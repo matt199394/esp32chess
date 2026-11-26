@@ -304,6 +304,14 @@ static void handleMove(void) {
   commit_move(legal);
   recordMove(legal);
 
+  /* conferma immediata della mossa con l'eventuale scacco dato: arriva
+   * PRIMA del think, cosi' la UI puo' segnalarlo senza aspettare la
+   * risposta del computer (RSP_MOVED e' retrocompatibile: la vecchia UI
+   * lo vede come risposta ignota ma la nuova lo gestisce) */
+  uint8_t givesCheck = in_check_of((uint8_t)(side ^ 1));
+  linkWriteByte(RSP_MOVED);
+  linkWriteByte(givesCheck ? F_CHECK : 0);
+
   uint8_t over = gameOverReason();
   if (over) { sendGameOver(over); return; }
 

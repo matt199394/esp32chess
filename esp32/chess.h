@@ -121,6 +121,7 @@ void commit_move(u16 m);                  /* push_move + avanza la partita */
 u8   legal_moves(u16 *list);
 u8   has_legal_moves(void);
 u8   in_check(void);
+u8   in_check_of(u8 c);   /* il re del colore c e' sotto scacco */
 
 s16  evaluate(void);                      /* dal punto di vista di chi muove */
 u16  think(u8 maxDepth, u32 maxNodes, s16 *score);

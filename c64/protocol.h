@@ -20,6 +20,7 @@
 #define RSP_BEST_MOVE 0x02   /* + mossa lo, mossa hi, score lo, score hi, depth, flags */
 #define RSP_GAME_OVER 0x03   /* + reason, winner */
 #define RSP_HIST      0x04   /* + n lo, n hi, poi n mosse (2 byte ciascuna) */
+#define RSP_MOVED     0x05   /* mossa dell'umano accettata: + flags (u8) */
 
 /* ---- reason di GAME_OVER ---- */
 #define OVER_MATE       1

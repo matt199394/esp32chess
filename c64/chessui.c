@@ -108,7 +108,8 @@ static char aiMove[8];              /* ultima mossa del computer (e2-e4) */
 static u8 hasAiMove;                /* 1 = c'e' una mossa del computer da mostrare */
 static s16 aiScore;
 static u8 aiDepth;
-static u8 checkFlag;                /* 1 = scacco segnalato dall'ESP32 */
+static u8 checkFlag;                /* 0 = nessuno, 1 = sei sotto scacco,
+                                       2 = la tua mossa ha dato scacco */
 static u8 emptyBoard;               /* 1 = scacchiera senza pezzi (menu) */
 static u8 g_wantNew;                /* scelta dell'utente a fine partita */
 
@@ -637,7 +638,8 @@ static void show_status(void)
     scr_puts(0, DEPTH_ROW, "d", COLOR_WHITE);
     if (hasAiMove) scr_unum(2, DEPTH_ROW, (unsigned int)aiDepth, COLOR_WHITE);
 
-    if (checkFlag) scr_puts(0, CHECK_ROW, "CHECK!", COLOR_YELLOW);
+    if (checkFlag == 1) scr_puts(0, CHECK_ROW, "SCACCO!", COLOR_LIGHTRED);
+    else if (checkFlag == 2) scr_puts(0, CHECK_ROW, "SCACCO!", COLOR_YELLOW);
     else scr_blank(0, CHECK_ROW, PANEL_W, COLOR_BLACK);
 }
 
@@ -707,6 +709,8 @@ static void ui_apply_move(u16 m)
 
     for (pc = 0; pc < drawnN; pc++)      /* pc riusato come indice */
         draw_square(drawnSq[pc]);
+
+    scr_blank(0, CHECK_ROW, PANEL_W, COLOR_BLACK);   /* via il vecchio avviso */
 }
 
 /* ================================================================== */
@@ -772,31 +776,43 @@ static u8 joy_read_raw(void)
 
 static u8 joy_poll(void)
 {
-    static u8 lastRaw = 0xFF;
-    static u8 stable = 0;
+    static u8 stable = 0;       /* ultimo stato stabile (debounced) */
+    static u8 cand = 0;         /* stato in stabilizzazione */
+    static u8 candCnt = 0;
     static u8 prev = 0;
-    static u8 cnt = 0;
     static u32 lastTick = 0;
+    static u32 holdT0 = 0;      /* inizio della tenuta dello stato stabile */
+    static u32 lastRep = 0;     /* ultimo auto-repeat */
     u32 now = (u32)clock();
-    u8 raw;
+    u8 raw = joy_read_raw();
+    u8 e;
 
-    if (now == lastTick) return 0;
-    lastTick = now;
-
-    raw = joy_read_raw();
-    if (raw == lastRaw) {
-        if (cnt < 2) {
-            cnt++;
-            if (cnt == 2) stable = raw;
+    if (raw != cand) {
+        cand = raw;
+        candCnt = 0;
+    }
+    if (now != lastTick) {
+        lastTick = now;
+        if (candCnt < 2) candCnt++;
+        if (candCnt == 2 && stable != cand) {
+            stable = cand;      /* nuovo stato stabile: reset del repeat */
+            holdT0 = now;
+            lastRep = now;
         }
-    } else {
-        lastRaw = raw;
-        cnt = 0;
     }
 
-    raw = (u8)(stable & (stable ^ prev));
+    e = (u8)(stable & (stable ^ prev));   /* press: nuovo evento */
     prev = stable;
-    return raw;
+    if (e) return e;
+
+    /* auto-repeat delle direzioni se tenute (non con il fire premuto):
+     * dopo ~1/4 s di tenuta, un passo ogni ~2 jiffy */
+    if (!(stable & JB_FIRE) && (stable & 0x0F) &&
+        now - holdT0 > 15 && now - lastRep >= 2) {
+        lastRep = now;
+        return (u8)(stable & 0x0F);
+    }
+    return 0;
 }
 
 static u16 move_from_squares(u8 from, u8 to)
@@ -990,7 +1006,7 @@ static unsigned char read_over_tail(unsigned char *reason, unsigned char *winner
  * partita). Il programma NON esce piu' in silenzio a BASIC dopo la partita. */
 static void show_game_over(u8 reason, u8 winner) {
     static const char *rtxt[5] = {
-        "CHECKMATE", "STALEMATE", "50 MOVE DRAW", "REPETITION", "MATERIAL"
+        "SCACCO MATTO", "STALLO", "50 MOSSE", "RIPETIZIONE", "MATERIALE"
     };
     char c;
 
@@ -1005,10 +1021,10 @@ static void show_game_over(u8 reason, u8 winner) {
         scr_puts(0, OVER_ROW, rtxt[reason - 1], COLOR_YELLOW);
     if (reason == OVER_MATE)
         scr_puts(0, OVER_WHO_ROW,
-                 winner == WINNER_WHITE ? "WHITE WINS" : "BLACK WINS", COLOR_YELLOW);
+                 winner == WINNER_WHITE ? "BIANCO VINCE" : "NERO VINCE", COLOR_YELLOW);
     else
-        scr_puts(0, OVER_WHO_ROW, "DRAW", COLOR_YELLOW);
-    scr_puts(0, OVER_KEY_ROW, "N=NEW Q=QUIT", COLOR_WHITE);
+        scr_puts(0, OVER_WHO_ROW, "PATTA", COLOR_YELLOW);
+    scr_puts(0, OVER_KEY_ROW, "N=NUOVA Q=ESCI", COLOR_WHITE);
 
     for (;;) {
         c = cgetc();
@@ -1240,7 +1256,25 @@ static void game_loop(void) {
         }
 
         seg_open(SEG_AI);          /* il tempo d'attesa e' tempo dell'AI */
-        rsp = wait_rsp();
+        /* la conferma della mossa (MOVED) e l'eventuale rifiuto arrivano
+         * subito; con firmware vecchio (senza MOVED) si passa dritti a
+         * BEST_MOVE/GAME_OVER */
+        rsp = comm_rx_byte(RX_TIMEOUT_BYTE);
+
+        if (rsp == RSP_MOVED) {
+            int f = comm_rx_byte(RX_TIMEOUT_BYTE);
+            if (f < 0) {
+                link_error();
+                if (!resync_board()) return;
+                continue;
+            }
+            if (f & F_CHECK) {                /* la tua mossa ha dato scacco */
+                checkFlag = 2;
+                show_status();
+                sfx_check();
+            }
+            rsp = wait_rsp();                 /* poi GAME_OVER o BEST_MOVE */
+        }
 
         if (rsp == RSP_ILLEGAL) {
             u8 i;

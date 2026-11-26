@@ -70,6 +70,7 @@ Tutti i comandi sono **1 byte + eventuali parametri**; tutte le risposte sono
 | `0x02` | `BEST_MOVE` | mossa lo, mossa hi, score lo, score hi, depth (u8), flags (u8) | risposta del computer |
 | `0x03` | `GAME_OVER` | reason (u8), winner (u8) | fine partita |
 | `0x04` | `HIST`      | n lo, n hi, poi n mosse (lo, hi) | storico completo della partita |
+| `0x05` | `MOVED`     | flags (u8) | mossa dell'umano accettata; primo bit = scacco dato. Inviato subito dopo `MOVE`, prima del think; segue `BEST_MOVE` o `GAME_OVER` |
 
 ### Codifica mossa (16 bit, identica su entrambi i lati)
 
@@ -104,8 +105,9 @@ insufficiente.
    bianco apre); altrimenti tocca all'umano.
 3. Ad ogni `MOVE` dell'umano l'ESP32 risponde:
    - `ILLEGAL` → l'umano ripete;
-   - `GAME_OVER` → l'umano ha chiuso la partita (matto/stallo/patta);
-   - `BEST_MOVE` → mossa del computer (ed eventuale `GAME_OVER` in coda).
+   - `MOVED` (con l'eventuale flag "scacco dato") subito dopo l'accettazione,
+     poi `GAME_OVER` (l'umano ha chiuso la partita: matto/stallo/patta) o
+     `BEST_MOVE` → mossa del computer (ed eventuale `GAME_OVER` in coda).
 
 ## Resync dopo un errore di collegamento
 

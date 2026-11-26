@@ -329,6 +329,14 @@ u8 in_check(void)
     return attacked(kingSq[side], (u8)(side ^ 1));
 }
 
+/* il re del colore c e' sotto scacco nella posizione attuale (senza
+ * toccare il lato al tratto): serve all'INK per segnalare lo scacco
+ * dato dall'umano */
+u8 in_check_of(u8 c)
+{
+    return attacked(kingSq[c], (u8)(c ^ 1));
+}
+
 /* ------------------------------------------------------------------ */
 /* generazione mosse                                                   */
 /* ------------------------------------------------------------------ */
@@ -622,6 +630,9 @@ static void make_move(u16 m)
         npm = (s16)(npm + pieceVal[promoType[pr]]);
     }
     if (t == PAWN || cap) halfmove = 0;
+    else                  halfmove++;   /* altrimenti la regola delle 50 mosse
+                                                 * (e il conteggio ripetizioni) non
+                                                 * scatta mai */
 
     if (t == KING) {
         kingSq[c] = to;
