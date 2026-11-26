@@ -29,6 +29,12 @@
 #define PC(p) ((unsigned char)((p) >> 3))
 #define MAKE_PIECE(t,c) ((unsigned char)((t) | ((c) << 3)))
 
+/* timeout di ricezione (ms): la risposta a un comando puo' arrivare dopo il
+ * think del motore (fino a 6s su EXPERT), i byte successivi arrivano a
+ * raffica. Su timeout comm_rx_byte svuota il buffer e ritorna -1. */
+#define RX_TIMEOUT_CMD   10000u
+#define RX_TIMEOUT_BYTE   2000u
+
 /* ---- codifica mossa (identica al motore) ---- */
 #define MK_MOVE(f,t,pr) ((unsigned int)((f) | ((t) << 7) | ((pr) << 14)))
 #define M_FROM(m) ((unsigned char)((m) & 0x7F))
@@ -243,14 +249,37 @@ static unsigned int parse_local(const char *s) {
 /* protocollo                                                          */
 /* ================================================================== */
 
-static void wait_ack(void) {
-  (void)comm_rx_byte();                 /* attende (e ignora) la risposta */
+/* Errore di collegamento: svuota il buffer e segnala; il chiamante decide
+ * se provare a risincronizzare (nuova partita) o uscire. */
+static void link_error(void) {
+  comm_rx_flush();
+  textcolor(COLOR_LIGHTRED);
+  cprintf("\r\nLINK ERROR\r\npress a key...\r\n");
+  (void)cgetc();
+}
+
+/* Ritorna 1 se e' arrivato l'ACK, 0 su timeout/errore. La consegna dei
+ * comandi e' affidabile (tx sincrona): se l'ACK si perde il comando e'
+ * comunque stato eseguito dall'ESP32. */
+static unsigned char wait_ack(void) {
+  return (comm_rx_byte(RX_TIMEOUT_CMD) == RSP_ACK) ? 1 : 0;
 }
 
 static void send_move(unsigned int m) {
+  comm_rx_flush();                      /* scarta eventuali byte residui */
   comm_tx_byte(CMD_MOVE);
   comm_tx_byte((unsigned char)(m & 0xFF));
   comm_tx_byte((unsigned char)((m >> 8) & 0xFF));
+}
+
+/* Legge reason/winner di GAME_OVER. Ritorna 1 ok, 0 su timeout. */
+static unsigned char read_over_tail(unsigned char *reason, unsigned char *winner) {
+  int r = comm_rx_byte(RX_TIMEOUT_BYTE);
+  int w = comm_rx_byte(RX_TIMEOUT_BYTE);
+  if (r < 0 || w < 0) { link_error(); return 0; }
+  *reason = (unsigned char)r;
+  *winner = (unsigned char)w;
+  return 1;
 }
 
 static void show_game_over(unsigned char reason, unsigned char winner) {
@@ -270,13 +299,25 @@ static void show_game_over(unsigned char reason, unsigned char winner) {
 
 /* Legge il payload di BEST_MOVE (il byte RSP_BEST_MOVE e' gia' stato letto),
  * applica la mossa del computer e mostra punteggio/profondita'.
- * Ritorna 1 se la partita e' finita. */
+ * Ritorna 1 se la partita e' finita, 0 se prosegue, 2 su errore di link. */
 static unsigned char recv_best_payload(void) {
   char buf[6];
-  unsigned int  m = (unsigned int)comm_rx_byte() | ((unsigned int)comm_rx_byte() << 8);
-  int score      = (int)((unsigned int)comm_rx_byte() | ((unsigned int)comm_rx_byte() << 8));
-  unsigned char depth = comm_rx_byte();
-  unsigned char flags = comm_rx_byte();
+  unsigned int  m;
+  int           b, score;
+  unsigned char depth, flags, reason, winner;
+
+  b = comm_rx_byte(RX_TIMEOUT_BYTE); if (b < 0) { link_error(); return 2; }
+  m = (unsigned int)b;
+  b = comm_rx_byte(RX_TIMEOUT_BYTE); if (b < 0) { link_error(); return 2; }
+  m |= (unsigned int)b << 8;
+  b = comm_rx_byte(RX_TIMEOUT_BYTE); if (b < 0) { link_error(); return 2; }
+  score = b;
+  b = comm_rx_byte(RX_TIMEOUT_BYTE); if (b < 0) { link_error(); return 2; }
+  score |= b << 8;
+  b = comm_rx_byte(RX_TIMEOUT_BYTE); if (b < 0) { link_error(); return 2; }
+  depth = (unsigned char)b;
+  b = comm_rx_byte(RX_TIMEOUT_BYTE); if (b < 0) { link_error(); return 2; }
+  flags = (unsigned char)b;
 
   apply_move_local(m);
   if (histN < 400) hist[histN++] = m;
@@ -290,8 +331,31 @@ static unsigned char recv_best_payload(void) {
     cprintf("CHECK!\r\n");
   }
   if (flags & F_GAMEOVER) {
-    unsigned char reason = comm_rx_byte();
-    unsigned char winner = comm_rx_byte();
+    if (!read_over_tail(&reason, &winner)) return 2;
+    show_game_over(reason, winner);
+    return 1;
+  }
+  return 0;
+}
+
+/* Manda NEW_GAME e, se l'umano e' nero, consuma l'apertura del computer.
+ * E' anche la procedura di resync dopo un errore di collegamento (riporta
+ * entrambi i lati a una posizione nota).
+ * Ritorna 0 ok, 1 partita finita subito, 2 errore di link. */
+static unsigned char start_new_game(void) {
+  int           r;
+  unsigned char reason, winner;
+
+  comm_rx_flush();
+  comm_tx_byte(CMD_NEW_GAME);
+  if (!wait_ack()) return 2;
+  if (humanColor != BLACK) return 0;
+
+  r = comm_rx_byte(RX_TIMEOUT_CMD);
+  if (r < 0) { link_error(); return 2; }
+  if (r == RSP_BEST_MOVE) return recv_best_payload();
+  if (r == RSP_GAME_OVER) {
+    if (!read_over_tail(&reason, &winner)) return 2;
     show_game_over(reason, winner);
     return 1;
   }
@@ -305,9 +369,13 @@ static void do_undo(void) {
     cprintf("nothing to undo\r\n");
     return;
   }
+  comm_rx_flush();
   comm_tx_byte(CMD_UNDO);
-  wait_ack();
-
+  if (!wait_ack()) {
+    /* l'ESP32 ha comunque eseguito l'UNDO: ricostruiamo anche noi */
+    textcolor(COLOR_LIGHTRED);
+    cprintf("link timeout\r\n");
+  }
   histN -= 2;
   new_board_local();
   for (i = 0; i < histN; i++) apply_move_local(hist[i]);
@@ -335,7 +403,8 @@ static void game_loop(void) {
     }
     {
       unsigned int m = parse_local(buf);
-      unsigned char from, p, rsp;
+      unsigned char from, p, reason, winner;
+      int rsp, rc;
 
       if (m == MOVE_NONE) {
         textcolor(COLOR_LIGHTRED);
@@ -353,7 +422,7 @@ static void game_loop(void) {
       }
 
       send_move(m);
-      rsp = comm_rx_byte();
+      rsp = comm_rx_byte(RX_TIMEOUT_CMD);
 
       if (rsp == RSP_ILLEGAL) {
         textcolor(COLOR_LIGHTRED);
@@ -361,15 +430,20 @@ static void game_loop(void) {
         continue;
       }
       if (rsp == RSP_GAME_OVER) {         /* l'umano ha chiuso la partita */
-        unsigned char reason = comm_rx_byte();
-        unsigned char winner = comm_rx_byte();
+        if (!read_over_tail(&reason, &winner)) return;
         show_game_over(reason, winner);
         return;
       }
       if (rsp == RSP_BEST_MOVE) {         /* partita che prosegue */
         apply_move_local(m);
         if (histN < 400) hist[histN++] = m;
-        if (recv_best_payload()) return;
+        rc = recv_best_payload();
+        if (rc == 1) return;
+        if (rc == 2 && start_new_game() != 0) return;
+      }
+      if (rsp < 0) {                      /* timeout: prova a risincronizzare */
+        link_error();
+        if (start_new_game() != 0) return;
       }
     }
   }
@@ -403,22 +477,10 @@ int main(void) {
   cputc(c);
   cprintf("\r\n");
 
-  comm_tx_byte(CMD_SET_COLOR); comm_tx_byte(humanColor); wait_ack();
-  comm_tx_byte(CMD_SET_LEVEL); comm_tx_byte(level);      wait_ack();
-  comm_tx_byte(CMD_NEW_GAME);  wait_ack();
+  comm_tx_byte(CMD_SET_COLOR); comm_tx_byte(humanColor); (void)wait_ack();
+  comm_tx_byte(CMD_SET_LEVEL); comm_tx_byte(level);      (void)wait_ack();
 
-  if (humanColor == BLACK) {
-    /* il computer (bianco) apre: BEST_MOVE (o GAME_OVER) subito dopo l'ACK */
-    unsigned char rsp = comm_rx_byte();
-    if (rsp == RSP_BEST_MOVE) {
-      if (recv_best_payload()) return 0;
-    } else if (rsp == RSP_GAME_OVER) {
-      unsigned char reason = comm_rx_byte();
-      unsigned char winner = comm_rx_byte();
-      show_game_over(reason, winner);
-      return 0;
-    }
-  }
+  if (start_new_game()) return 0;
 
   game_loop();
   return 0;

@@ -67,8 +67,8 @@ tools/uart_test.py prova motore su seriale
    della cartuccia di riferimento); P lo ripristina `rti`. Attenzione: NON fare
    `pla/tay, pla/tax, pla` all'ingresso: spillerebbe i 3 byte (PCL,PCH,P) pushata
    dall'NMI e `rti` leggerebbe spazzatura -> crash del C64 (sintomo: READY).
-3. **Ring buffer rx da 4 byte** in `comm.s`: assorbe la raffica `BEST_MOVE`
-   (7 byte) senza perdite.
+3. **Ring buffer rx da 16 byte (15 utili)** in `comm.s`: assorbe la raffica
+   `BEST_MOVE` (7 byte) + `GAME_OVER` (3) senza perdite.
 4. **ESP32 = unico arbitro**; la UI C64 mantiene solo una copia della board per
    il display (`apply_move_local`, gestisce arrocco/en passant/promozione solo
    per disegnare) e NON decide la legalità.

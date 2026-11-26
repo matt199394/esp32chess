@@ -1,10 +1,64 @@
-# Bug aperto: `chessui` si blocca dopo N mosse
+# Bug: `chessui` si blocca dopo N mosse
 
-**Stato: APERTO — non risolto.**
-Ultimo aggiornamento: sessione corrente (bozza).
+**Stato: PARZIALMENTE RISOLTO — fix statici applicati, da confermare su
+hardware reale.**
+Ultimo aggiornamento: sessione di correzione.
 
 Questa nota raccoglie i sintomi, l'analisi statica del codice e le ipotesi
-sul guasto. Non contiene ancora una causa confermata né un rimedio.
+sul guasto.
+
+---
+
+## 0. Correzioni applicate (sessione di correzione)
+
+### Timeout + resync in `comm_rx_byte` (sezione 2, H4)
+
+`c64/comm.s`, `c64/comm.h`, `c64/chessui.c`:
+
+- `comm_rx_byte` ora ha firma `int comm_rx_byte(unsigned ms)` (0 = attesa
+  infinita): attende al più `ms` millisecondi usando il jiffy clock del
+  KERNAL (`$A1`), poi **svuota il ring buffer** e ritorna `-1` invece di
+  bloccare il C64 per sempre.
+- Nuovo `comm_rx_flush()` per scartare i byte residui prima di inviare un
+  comando (le letture tornano allineate al prossimo messaggio).
+- La UI gestisce i timeout: `wait_ack`, `recv_best_payload`, `read_over_tail`
+  e `game_loop` riconoscono `-1`, mostrano `LINK ERROR` e provano a
+  risincronizzare con una `NEW_GAME` (`start_new_game()`), che riporta
+  entrambi i lati a una posizione nota. Il timeout per la prima risposta di
+  un comando è 10 s (think fino a 6 s su EXPERT), 2 s per i byte successivi
+  della stessa raffica.
+
+### H1 — NMI spurio accodato come byte valido
+
+`c64/comm.s`: l'handler NMI legge `$DD0D` e controlla il **bit 4 (FLAG)**:
+se attivo l'NMI viene dal CIA2 (tasto RESTORE) e `$DF00` NON viene letto né
+accodato. Solo gli NMI della cartuccia (nessun bit CIA2) accodano il byte.
+Prima un RESTORE/spurio inseriva un byte falso e sfasava il protocollo.
+
+### H2/H3 — finestra di gara sull'handshake `io2`
+
+`esp32/esp32.ino`: nuovo flag `nmiArm`. `isr_io2` abilita l'ack solo quando
+l'ESP32 ha annunciato un byte con l'impulso `/NMI` (le letture di polling
+`$DF00` del ciclo di tx del C64 generano lo stesso fronte su `/I/O2` ma non
+contano più). In `busSendByte` c'è anche un margine di 100 µs dopo l'ack,
+per lasciare completare la copia all'handler NMI prima del byte successivo.
+
+### H5 — `gamePly` a 8 bit (bug latente confermato)
+
+`esp32/chess.c`, `esp32/chess.h`: `gamePly` è promosso a `u16`, così la
+soglia di compattazione `MAXKEYS - MAXSEARCH - 1` (303) diventa raggiungibile
+e la compattazione parte invece di lasciare il wrap a 256 semimosse che
+rompeva `repetition_count()` nelle partite lunghe. Verificato su host con un
+test a 700 semimosse pseudo-random sotto ASan: compattazione a soglia 303,
+nessuno sforamento di `keyHist[320]`, `repetition_count()` mai > 2.
+
+### Da fare ancora (su hardware)
+
+- Contatori di protocollo (`tx#`, `rx#`, `nmi#`, `overflow#`) e conferma su
+  hardware che il blocco sia sparito (punti 1, 4 e 6 del piano diagnostico).
+- Sync/len/checksum nel protocollo (punto 5): dopo un timeout la UI ora si
+  risincronizza con `NEW_GAME`, ma un errore a metà payload ancora fa
+  ripartire la partita invece di essere recuperato al volo.
 
 ---
 
@@ -109,6 +163,9 @@ comm_nmi:
 ```
 
 Ring buffer: `_comm_rx_buf` da 16 byte, indici a 4 bit → **15 byte utili**.
+
+Dopo le correzioni (sezione 0) l'handler accoda `$DF00` solo per gli NMI
+della cartuccia, e `comm_rx_byte` ha un timeout con flush/resync.
 
 ---
 

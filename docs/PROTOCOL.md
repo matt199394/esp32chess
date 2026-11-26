@@ -38,7 +38,10 @@ wait io2           ; il C64 ha letto $df00
 
 Il C64 installa un handler NMI **utente** al vettore RAM `$0318` (il KERNAL vi
 salta per gli NMI non-RESTORE). L'handler legge `$df00` e lo accoda a un ring
-buffer da 4 byte, così le raffiche di risposta non si perdono.
+buffer da 16 byte (15 utili), così le raffiche di risposta non si perdono;
+gli NMI generati dal CIA2 (tasto RESTORE) vengono riconosciuti dal bit 4 di
+`$dd0d` e scartati. `comm_rx_byte` ha un timeout: alla scadenza svuota il
+buffer e ritorna `-1` invece di bloccare il C64.
 
 ## Messaggi
 

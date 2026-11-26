@@ -47,6 +47,7 @@ static const uint8_t busD[8] = { 4, 33, 14, 27, 13, 22, 17, 26 }; /* D0..D7 */
 static volatile bool dataFromC64 = false;
 static volatile byte ch = 0;
 static volatile bool io2 = false;
+static volatile bool nmiArm = false;   /* abilita l'ack solo dopo l'annuncio /NMI */
 
 /* Il C64 scrive su $DE00 (I/O1): abbassa D7 (flow control) e cattura il byte
  * dal 74HC597 (shift register). */
@@ -59,9 +60,12 @@ static void IRAM_ATTR isr_io1() {
   digitalWrite(pload, LOW);
 }
 
-/* Il C64 legge $DF00 (I/O2): segnala che il byte inviato e' stato letto. */
+/* Il C64 legge $DF00 (I/O2): segnala che il byte inviato e' stato letto.
+ * Vale solo quando l'ESP32 ha annunciato un byte con /NMI: le letture di
+ * polling di $DF00 nel ciclo di tx del C64 generano lo stesso fronte su
+ * /I/O2 e non devono fare da ack (H3 in docs/BUGS.md). */
 static void IRAM_ATTR isr_io2() {
-  io2 = true;
+  if (nmiArm) io2 = true;
 }
 
 static void outByte(byte c) {
@@ -72,6 +76,7 @@ static void outByte(byte c) {
 static void busSendByte(byte b) {
   outByte(b);
   io2 = false;
+  nmiArm = true;          /* solo le letture successive all'annuncio contano */
   digitalWrite(oC64NMI, HIGH);
   delayMicroseconds(150);
   digitalWrite(oC64NMI, LOW);
@@ -80,6 +85,8 @@ static void busSendByte(byte b) {
     if (micros() - t0 > 50000) break;  /* timeout 50 ms: abbandona */
     delayMicroseconds(10);
   }
+  nmiArm = false;
+  delayMicroseconds(100); /* margine: l'handler NMI completa la copia */
   io2 = false;
 }
 

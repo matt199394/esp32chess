@@ -20,7 +20,7 @@ s8  epSq;
 u8  halfmove;
 u8  kingSq[2];
 u16 posKey;
-u8  gamePly;
+u16 gamePly;
 u16 keyHist[MAXKEYS];
 u32 nodes;
 
@@ -715,7 +715,7 @@ void commit_move(u16 m)
        gamePly + (MAXSEARCH - 1): compatta PRIMA che gamePly possa
        far sforare il buffer (il vecchio limite MAXKEYS-4 era troppo
        alto e con gamePly=315 + 9 ply scriveva oltre keyHist[319]). */
-    if (gamePly >= (u8)(MAXKEYS - MAXSEARCH - 1)) {
+    if (gamePly >= (u16)(MAXKEYS - MAXSEARCH - 1)) {
         /* compatta la storia: restano le ultime 64 posizioni */
         for (i = 0; i < 64; i++) keyHist[i] = keyHist[gamePly - 63 + i];
         gamePly = 63;

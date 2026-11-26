@@ -97,7 +97,7 @@ extern s8  epSq;          /* -1 oppure casa 0x88 */
 extern u8  halfmove;      /* semimosse dall'ultima irrversibile */
 extern u8  kingSq[2];
 extern u16 posKey;
-extern u8  gamePly;       /* indice in keyHist della posizione corrente */
+extern u16 gamePly;       /* indice in keyHist della posizione corrente */
 extern u16 keyHist[MAXKEYS];
 extern u32 nodes;         /* nodi visitati dall'ultima think() */
 extern u8  quiesceMax;    /* profondita' massima della quiescenza (0 = off) */

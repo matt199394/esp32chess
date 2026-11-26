@@ -2,8 +2,11 @@
  *
  *  - comm_install()   installa l'handler NMI utente al vettore $0318.
  *  - comm_tx_byte(b)  attende $DF00 bit 7 e scrive b su $DE00.
- *  - comm_rx_byte()   attende un byte dall'ESP32 (ring buffer alimentato
- *                     dall'NMI) e lo restituisce.
+ *  - comm_rx_byte(ms) attende un byte dall'ESP32 (ring buffer alimentato
+ *                     dall'NMI) per al piu' ms millisecondi (0 = attesa
+ *                     infinita) e lo restituisce; su timeout svuota il
+ *                     ring buffer (resync) e ritorna -1.
+ *  - comm_rx_flush()  scarta i byte ricevuti ma non consumati.
  *
  * Le implementazioni sono in comm.s.
  */
@@ -11,8 +14,9 @@
 #define COMM_H
 
 void comm_install(void);
+void comm_rx_flush(void);
 
 void __fastcall__ comm_tx_byte(unsigned char b);
-unsigned char __fastcall__ comm_rx_byte(void);
+int  __fastcall__ comm_rx_byte(unsigned int timeout_ms);
 
 #endif /* COMM_H */
