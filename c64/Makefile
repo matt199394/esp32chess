@@ -4,11 +4,11 @@
 # make clean
 
 CC65 = cl65
-CFLAGS = -t c64 -Oirs -Wl -D,__STACKSIZE__=0x1000
+CFLAGS = -t c64 -Oirs -m chessui.map -Wl -D,__STACKSIZE__=0x1000
 
 all: chessui.prg
 
-chessui.prg: chessui.c comm.s comm.h protocol.h
+chessui.prg: chessui.c comm.s comm.h protocol.h font_writer.h
 	$(CC65) $(CFLAGS) -o chessui.prg chessui.c comm.s
 
 clean:

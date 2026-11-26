@@ -14,7 +14,9 @@ c64esp32cart), il **C64 fa solo da UI** (scacchiera, tastiera, testo, suoni).
 - **FATTO** trasporto ESP32: `Serial` (default, per test) + bus cartuccia
   (`-DUSE_C64_BUS`).
 - **FATTO** trasporto C64: `comm.s` (tx polling + rx via NMI, ring buffer 4B).
-- **BOZZA** UI C64 **testuale** con conio (da sostituire con la 3×3-charset).
+- **FATTO** UI C64 **grafica** 3×3-charset (da chess-alphabeta): scacchiera 24×24,
+  pezzi glyph invertiti, pannello sinistro, effetti sonori SID, joystick port 2,
+  doppio timer (giocatore/AI), mossa del giocatore mostrata subito (snapshot/restore).
 - **TODO** vedere "Prossimi passi" in fondo.
 
 ## Build (verificati in questa sessione)
@@ -46,7 +48,8 @@ esp32/
   chess.c/chess.h  motore (copiato da chess2026, non modificare senza perft)
   protocol.h       costanti protocollo (KEEP IN SYNC con c64/protocol.h)
 c64/
-  chessui.c        UI testuale + macchina a stati
+  chessui.c        UI grafica 3×3-charset + macchina a stati
+  font_writer.h    font 512B per il charset custom
   comm.s/comm.h    byte a byte $DE00/$DF00 + NMI ($0318, ring buffer 4B)
   protocol.h       costanti protocollo
   Makefile         cl65 -> chessui.prg
@@ -101,9 +104,8 @@ tools/uart_test.py prova motore su seriale
 1. ~~Porting motore + protocollo + UI testuale~~ FATTO (bozza).
 2. Provare il motore con `tools/uart_test.py` (e un paio di mosse: `e2e4`,
    promozione `e7e8q`, mossa illegale).
-3. Portare la UI grafica C64 3×3-charset da `chess2026/src/main_c64.c`
-   (scacchiera 24×24, pezzi disegnati glyph 64-123, pannello sinistro,
-   joystick, suoni SID) mantenendo `comm.s` al posto del motore locale.
+3. ~~Portare la UI grafica C64 3×3-charset~~ FATTO (grafica, SID, joystick,
+   timer, mossa immediata; font in `c64/font_writer.h`).
 4. Mock dell'ESP32 (o modalità simulata) per provare la UI in VICE senza
    cartuccia.
 5. Transposition table + history heuristic sull'ESP32 (RAM/CPU abbondanti).
