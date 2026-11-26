@@ -13,7 +13,7 @@ c64esp32cart), il **C64 fa solo da UI** (scacchiera, tastiera, testo, suoni).
 - **FATTO** protocollo §4 implementato su entrambi i lati.
 - **FATTO** trasporto ESP32: `Serial` (default, per test) + bus cartuccia
   (`-DUSE_C64_BUS`).
-- **FATTO** trasporto C64: `comm.s` (tx polling + rx via NMI, ring buffer 4B).
+- **FATTO** trasporto C64: `comm.s` (tx polling + rx via NMI, ring buffer 16B).
 - **FATTO** UI C64 **grafica** 3×3-charset (da chess-alphabeta): scacchiera 24×24,
   pezzi glyph invertiti, pannello sinistro, effetti sonori SID, joystick port 2,
   doppio timer (giocatore/AI), mossa del giocatore mostrata subito (snapshot/restore).
@@ -50,7 +50,7 @@ esp32/
 c64/
   chessui.c        UI grafica 3×3-charset + macchina a stati
   font_writer.h    font 512B per il charset custom
-  comm.s/comm.h    byte a byte $DE00/$DF00 + NMI ($0318, ring buffer 4B)
+  comm.s/comm.h    byte a byte $DE00/$DF00 + NMI ($0318, ring buffer 16B)
   protocol.h       costanti protocollo
   Makefile         cl65 -> chessui.prg
 docs/PROTOCOL.md   contratto del protocollo + trasporto fisico

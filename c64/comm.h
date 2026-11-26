@@ -8,6 +8,10 @@
  *                     dall'NMI) per al piu' ms millisecondi (0 = attesa
  *                     infinita) e lo restituisce; su timeout svuota il
  *                     ring buffer (resync) e ritorna -1.
+ *  - comm_rx_poll()   lettura immediata senza attesa e senza flush:
+ *                     ritorna il byte se presente, -1 se il buffer e'
+ *                     vuoto. Da usare nei polling lunghi (attesa think):
+ *                     non puo' perdere byte in volo.
  *  - comm_rx_flush()  scarta i byte ricevuti ma non consumati.
  *
  * Le implementazioni sono in comm.s.
@@ -20,5 +24,6 @@ void comm_rx_flush(void);
 
 int  __fastcall__ comm_tx_byte(unsigned char b);
 int  __fastcall__ comm_rx_byte(unsigned int timeout_ms);
+int  __fastcall__ comm_rx_poll(void);
 
 #endif /* COMM_H */

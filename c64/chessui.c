@@ -289,22 +289,66 @@ static void scr_clear(void)
     }
 }
 
-/* effetto sonoro SID: f = frequency word (byte basso), w = forma d'onda */
-static void sfx(u8 f, u8 w)
+/* ------------------------------------------------------------------ */
+/* effetti sonori SID (voce 1): note musicali con envelope, non       */
+/* semplici tonfi: l'onda quadra a frequenza bassissima del primo     */
+/* draft era in pratica una serie di click.                           */
+/* ------------------------------------------------------------------ */
+
+static void sid_wait(u8 j)
+{
+    u32 t = (u32)clock() + j;
+    while ((u32)clock() < t) {}
+}
+
+/* nota singola: f = frequency word, wave = forma d'onda senza gate,
+   jfy = jiffy di gate. Sustain pieno e release breve: suono pieno che
+   sfuma invece di troncarsi di netto. */
+static void sid_note(u16 f, u8 wave, u8 jfy)
 {
     POKE(0xD418, 0x0F);            /* volume massimo */
     POKE(0xD405, 0x00);            /* attacco immediato */
-    POKE(0xD406, 0xF0);            /* sustain 15, release 0 */
-    POKE(0xD402, 0x00);            /* pulse width 50% */
-    POKE(0xD403, 0x08);
-    POKE(0xD400, f);
-    POKE(0xD401, 0x00);
-    POKE(0xD404, (u8)(w | 0x01));  /* gate on */
-    {
-        u32 t = (u32)clock() + 12;
-        while ((u32)clock() < t) {}
+    POKE(0xD406, 0xF3);            /* sustain 15, release breve */
+    POKE(0xD400, (u8)(f & 0xFF));
+    POKE(0xD401, (u8)(f >> 8));
+    POKE(0xD404, (u8)(wave | 0x01));  /* gate on */
+    sid_wait(jfy);
+    POKE(0xD404, wave);            /* gate off */
+}
+
+/* "tock" di mossa: tick alto; sulle catture un tonfo piu' grave */
+static void sfx_move(u8 capture)
+{
+    if (capture) {
+        sid_note(0x218A, 0x11, 8);     /* triangle C5 */
+        sid_note(0x0862, 0x11, 10);    /* triangle C3: tonfo */
+    } else {
+        sid_note(0x4313, 0x11, 6);     /* triangle C6: tick */
     }
-    POKE(0xD404, w);               /* gate off */
+}
+
+/* errore: due tonfi gravi in onda quadra */
+static void sfx_error(void)
+{
+    sid_note(0x070D, 0x41, 7);
+    sid_wait(2);
+    sid_note(0x070D, 0x41, 7);
+}
+
+/* scacco: doppio beep acuto */
+static void sfx_check(void)
+{
+    sid_note(0x2A41, 0x41, 5);
+    sid_wait(2);
+    sid_note(0x2A41, 0x41, 5);
+}
+
+/* fine partita: tre note discendenti */
+static void sfx_gameover(void)
+{
+    sid_note(0x218A, 0x11, 10);
+    sid_note(0x1920, 0x11, 10);
+    sid_note(0x10C5, 0x11, 14);
 }
 
 /* ================================================================== */
@@ -568,6 +612,15 @@ static void put_msg(const char *s, u8 color)
     scr_puts(0, MSG_ROW, s, color);
 }
 
+/* tiene il messaggio a schermo per ~1,5 s (con i timer aggiornati):
+ * senza, il prompt successivo lo cancella prima di renderlo leggibile */
+static void msg_hold(void)
+{
+    u32 t = (u32)clock() + 90;
+    while ((u32)clock() < t) show_timers();
+    scr_blank(0, MSG_ROW, PANEL_W, COLOR_BLACK);
+}
+
 static void show_status(void)
 {
     scr_blank(0, MOVE_ROW, PANEL_W, COLOR_BLACK);
@@ -608,18 +661,32 @@ static void snap_restore(void)
     h2 = snapH2;
 }
 
-/* applica una mossa alla copia locale e ridisegna. Arrocco ed en passant
-   muovono piu' di un pezzo: li' si ridisegna tutto. */
+/* case toccate dall'ultima ui_apply_move: servono a ripristinare il
+ * disegno dopo una mossa rifiutata dall'ESP32 (solo quelle, non tutta
+ * la scacchiera) */
+static u8 drawnSq[6];
+static u8 drawnN;
+
+/* applica una mossa alla copia locale e ridisegna SOLO le case toccate
+ * (arrocco ed en passant compresi) */
 static void ui_apply_move(u16 m)
 {
     u8 from = M_FROM(m);
     u8 to = M_TO(m);
-    u8 t = PT(lboard[from]);
+    u8 p = lboard[from];
+    u8 t = PT(p);
+    u8 pc = PC(p);
     u8 oh2 = h2;
-    u8 many;
+    u8 capture = (u8)(lboard[to] != EMPTY);
+    u8 rookFrom = 0xFF, rookTo = 0xFF, epCap = 0xFF;
 
-    many = (u8)((t == KING && ((u8)(to - from) == 2 || (u8)(from - to) == 2)) ||
-                (t == PAWN && lboard[to] == EMPTY && (to & 7) != (from & 7)));
+    if (t == KING && ((u8)(to - from) == 2 || (u8)(from - to) == 2)) {
+        if (to > from) { rookFrom = (u8)(to + 1); rookTo = (u8)(to - 1); }
+        else           { rookFrom = (u8)(to - 2); rookTo = (u8)(to + 1); }
+    } else if (t == PAWN && lboard[to] == EMPTY && (to & 7) != (from & 7)) {
+        epCap = (u8)(to + (pc == WHITE ? -16 : 16));
+        capture = 1;
+    }
 
     apply_move_local(m);
     h1 = from;
@@ -627,17 +694,17 @@ static void ui_apply_move(u16 m)
     joyFrom = 0xFF;
     joyCursor = 0xFF;
     checkFlag = 0;
-    sfx(93, 0x40);
+    sfx_move(capture);
 
-    if (many) {
-        draw_board();
-        show_status();
-        show_timers();
-        return;
-    }
-    if (oh2 != 0xFF) draw_square(oh2);
-    draw_square(from);
-    draw_square(to);
+    drawnN = 0;
+    if (oh2 != 0xFF)      drawnSq[drawnN++] = oh2;
+    drawnSq[drawnN++] = from;
+    drawnSq[drawnN++] = to;
+    if (rookFrom != 0xFF) { drawnSq[drawnN++] = rookFrom; drawnSq[drawnN++] = rookTo; }
+    if (epCap != 0xFF)    drawnSq[drawnN++] = epCap;
+
+    for (pc = 0; pc < drawnN; pc++)      /* pc riusato come indice */
+        draw_square(drawnSq[pc]);
 }
 
 /* ================================================================== */
@@ -779,7 +846,7 @@ static u16 get_human_move(void)
                 mv = parse_local(kb);
                 if (mv != MOVE_NONE) return mv;
                 put_msg("bad move", COLOR_LIGHTRED);
-                sfx(228, 0x20);
+                sfx_error();
                 while (klen) {
                     klen--;
                     scr_put((u8)(6 + klen), PROMPT_ROW, 0x20, COLOR_WHITE);
@@ -824,13 +891,13 @@ static u16 get_human_move(void)
                         paint_sq(joyFrom);
                     } else {
                         put_msg("not yours", COLOR_LIGHTRED);
-                        sfx(228, 0x20);
+                        sfx_error();
                     }
                 } else {
                     u16 mv = move_from_squares(joyFrom, joyCursor);
                     if (mv != MOVE_NONE) return mv;
                     put_msg("bad move", COLOR_LIGHTRED);
-                    sfx(228, 0x20);
+                    sfx_error();
                     {
                         u8 oldFrom = joyFrom;
                         joyFrom = 0xFF;
@@ -884,18 +951,26 @@ static int send_move(u16 m) {
 
 /* Attende il primo byte di risposta aggiornando il timer dell'AI; usato
  * quando l'ESP32 puo' impiegarci il tempo del think. Ritorna il byte,
- * -1 su deadline scaduta. */
+ * -1 su deadline scaduta.
+ * Usa comm_rx_poll (mai il flush di comm_rx_byte): il flush ripetuto ad
+ * ogni timeout puo' buttare via il byte che arriva proprio nella finestra
+ * tra l'ultimo controllo e lo svuotamento (~30us per poll) ed era la
+ * causa di LINK ERROR sporadici a partita avanzata. */
 static int wait_rsp(void) {
-    u32 deadline = (u32)clock() + (u32)(RX_TIMEOUT_CMD / 17UL);
+    u32 deadline = (u32)clock() + MS_TO_JFY(RX_TIMEOUT_CMD);
+    u32 lastJfy = (u32)clock();
     int r;
 
     scr_blank(0, PROMPT_ROW, PANEL_W, COLOR_BLACK);
     scr_puts(0, PROMPT_ROW, "thinking...", COLOR_WHITE);
     for (;;) {
-        r = comm_rx_byte(200);
+        r = comm_rx_poll();
         if (r >= 0) return r;
-        show_timers();
-        if ((u32)clock() >= deadline) return -1;
+        if ((u32)clock() != lastJfy) {
+            lastJfy = (u32)clock();
+            show_timers();
+            if (lastJfy >= deadline) return -1;
+        }
     }
 }
 
@@ -917,6 +992,7 @@ static void show_game_over(u8 reason, u8 winner) {
     };
     char c;
 
+    sfx_gameover();
     scr_blank(0, PROMPT_ROW, PANEL_W, COLOR_BLACK);
     scr_blank(0, MSG_ROW, PANEL_W, COLOR_BLACK);
     scr_blank(0, OVER_ROW, PANEL_W, COLOR_BLACK);
@@ -979,6 +1055,7 @@ static unsigned char recv_best_payload(void) {
 
     show_status();
     show_timers();
+    if (checkFlag) sfx_check();
 
     if (flags & F_GAMEOVER) {
         if (!read_over_tail(&reason, &winner)) return 2;
@@ -1093,7 +1170,7 @@ static unsigned char do_undo(void) {
     u16 i;
     if (histN < 2) {
         put_msg("nothing", COLOR_LIGHTRED);
-        sfx(228, 0x20);
+        sfx_error();
         return 0;
     }
     if (comm_tx_byte(CMD_UNDO) != 0) {
@@ -1146,7 +1223,8 @@ static void game_loop(void) {
         p = lboard[from];
         if (p == EMPTY || PC(p) != lside) {
             put_msg("not yours", COLOR_LIGHTRED);
-            sfx(228, 0x20);
+            sfx_error();
+            msg_hold();
             continue;
         }
 
@@ -1163,12 +1241,14 @@ static void game_loop(void) {
         rsp = wait_rsp();
 
         if (rsp == RSP_ILLEGAL) {
+            u8 i;
             snap_restore();
-            draw_board();
-            show_status();
-            show_timers();
+            for (i = 0; i < drawnN; i++)   /* ridisegna solo le case toccate */
+                draw_square(drawnSq[i]);
+            scr_blank(0, PROMPT_ROW, PANEL_W, COLOR_BLACK);
             put_msg("bad move", COLOR_LIGHTRED);
-            sfx(228, 0x20);
+            sfx_error();
+            msg_hold();
             continue;
         }
         if (rsp == RSP_GAME_OVER) {           /* l'umano ha chiuso la partita */

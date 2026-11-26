@@ -23,6 +23,7 @@
         .export _comm_install
         .export _comm_tx_byte
         .export _comm_rx_byte
+        .export _comm_rx_poll
         .export _comm_rx_flush
 
 .segment "BSS"
@@ -139,6 +140,33 @@ _comm_rx_byte:
         sta _comm_rx_tail
         lda _comm_rx_tmp
         ldx #0
+        rts
+
+; ---------------------------------------------------------------------------
+; int comm_rx_poll(void)
+;   Lettura immediata, senza attesa e SENZA flush: ritorna il byte se il
+;   ring buffer non e' vuoto, -1 altrimenti. Servita al polling dell'attesa
+;   risposta: a differenza di comm_rx_byte non svuota mai il buffer alla
+;   scadenza, quindi non puo' buttare via un byte che arriva proprio
+;   durante la finestra di timeout (causa di LINK ERROR sporadici).
+; ---------------------------------------------------------------------------
+_comm_rx_poll:
+        lda _comm_rx_head
+        cmp _comm_rx_tail
+        beq @empty
+        ldx _comm_rx_tail
+        lda _comm_rx_buf,x
+        sta _comm_rx_tmp
+        lda _comm_rx_tail
+        clc
+        adc #1
+        and #15
+        sta _comm_rx_tail
+        lda _comm_rx_tmp
+        ldx #0
+        rts
+@empty: lda #$ff
+        ldx #$ff
         rts
 
 ; ---------------------------------------------------------------------------
