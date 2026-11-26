@@ -1,0 +1,15 @@
+# cc65 / C64 build artifacts
+c64/*.o
+c64/*.map
+c64/*.lst
+c64/*.prg
+c64/*.sym
+
+# ESP32 / Arduino build artifacts
+esp32/build/
+*.bin
+*.elf
+
+# editor / OS
+*~
+.DS_Store
