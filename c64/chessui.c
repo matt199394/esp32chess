@@ -35,6 +35,8 @@
 #define RX_TIMEOUT_CMD   10000u
 #define RX_TIMEOUT_BYTE   2000u
 
+static unsigned char g_wantNew;         /* scelta dell'utente a fine partita */
+
 /* ---- codifica mossa (identica al motore) ---- */
 #define MK_MOVE(f,t,pr) ((unsigned int)((f) | ((t) << 7) | ((pr) << 14)))
 #define M_FROM(m) ((unsigned char)((m) & 0x7F))
@@ -250,7 +252,7 @@ static unsigned int parse_local(const char *s) {
 /* ================================================================== */
 
 /* Errore di collegamento: svuota il buffer e segnala; il chiamante decide
- * se provare a risincronizzare (nuova partita) o uscire. */
+ * se provare a risincronizzare o uscire. */
 static void link_error(void) {
   comm_rx_flush();
   textcolor(COLOR_LIGHTRED);
@@ -258,18 +260,26 @@ static void link_error(void) {
   (void)cgetc();
 }
 
+/* Consuma i byte residui finche' non arriva silenzio per un breve timeout:
+ * dopo un errore l'ESP32 puo' avere una raffica ancora in volo (i suoi
+ * busSendByte proseguono con i loro timeout) e va spenta prima di un resync. */
+static void drain_link(void) {
+  while (comm_rx_byte(100) >= 0) ;
+}
+
 /* Ritorna 1 se e' arrivato l'ACK, 0 su timeout/errore. La consegna dei
- * comandi e' affidabile (tx sincrona): se l'ACK si perde il comando e'
+ * comandi e' affidabile (tx con ack): se l'ACK si perde il comando e'
  * comunque stato eseguito dall'ESP32. */
 static unsigned char wait_ack(void) {
   return (comm_rx_byte(RX_TIMEOUT_CMD) == RSP_ACK) ? 1 : 0;
 }
 
-static void send_move(unsigned int m) {
-  comm_rx_flush();                      /* scarta eventuali byte residui */
-  comm_tx_byte(CMD_MOVE);
-  comm_tx_byte((unsigned char)(m & 0xFF));
-  comm_tx_byte((unsigned char)((m >> 8) & 0xFF));
+/* Ritorna 0 ok, -1 su errore di trasmissione. */
+static int send_move(unsigned int m) {
+  if (comm_tx_byte(CMD_MOVE) != 0) return -1;
+  if (comm_tx_byte((unsigned char)(m & 0xFF)) != 0) return -1;
+  if (comm_tx_byte((unsigned char)((m >> 8) & 0xFF)) != 0) return -1;
+  return 0;
 }
 
 /* Legge reason/winner di GAME_OVER. Ritorna 1 ok, 0 su timeout. */
@@ -282,10 +292,13 @@ static unsigned char read_over_tail(unsigned char *reason, unsigned char *winner
   return 1;
 }
 
+/* Mostra il risultato e chiede cosa fare; esita in g_wantNew (1 = nuova
+ * partita). Il programma NON esce piu' in silenzio a BASIC dopo la partita. */
 static void show_game_over(unsigned char reason, unsigned char winner) {
   static const char *msg[5] = {
     "CHECKMATE", "STALEMATE", "50 MOVE DRAW", "REPETITION", "MATERIAL"
   };
+  char c;
   textcolor(COLOR_LIGHTRED);
   if (reason >= 1 && reason <= 5)
     cprintf("\r\n%s!\r\n", msg[reason - 1]);
@@ -293,8 +306,12 @@ static void show_game_over(unsigned char reason, unsigned char winner) {
     cprintf(winner == WINNER_WHITE ? "WHITE WINS" : "BLACK WINS");
   else
     cprintf("DRAW");
-  cprintf("\r\npress a key...\r\n");
-  (void)cgetc();
+  cprintf("\r\n\r\nN = new game, Q = quit\r\n");
+  for (;;) {
+    c = cgetc();
+    if (c == 'n' || c == 'N') { g_wantNew = 1; return; }
+    if (c == 'q' || c == 'Q') { g_wantNew = 0; return; }
+  }
 }
 
 /* Legge il payload di BEST_MOVE (il byte RSP_BEST_MOVE e' gia' stato letto),
@@ -338,18 +355,12 @@ static unsigned char recv_best_payload(void) {
   return 0;
 }
 
-/* Manda NEW_GAME e, se l'umano e' nero, consuma l'apertura del computer.
- * E' anche la procedura di resync dopo un errore di collegamento (riporta
- * entrambi i lati a una posizione nota).
- * Ritorna 0 ok, 1 partita finita subito, 2 errore di link. */
-static unsigned char start_new_game(void) {
+/* Legge la risposta del computer a NEW_GAME/GO (dopo l'eventuale ACK).
+ * Ritorna 0 ok, 1 partita finita (show_game_over ha chiesto nuova/esci),
+ * 2 errore di link. */
+static unsigned char recv_engine_move(void) {
   int           r;
   unsigned char reason, winner;
-
-  comm_rx_flush();
-  comm_tx_byte(CMD_NEW_GAME);
-  if (!wait_ack()) return 2;
-  if (humanColor != BLACK) return 0;
 
   r = comm_rx_byte(RX_TIMEOUT_CMD);
   if (r < 0) { link_error(); return 2; }
@@ -359,26 +370,85 @@ static unsigned char start_new_game(void) {
     show_game_over(reason, winner);
     return 1;
   }
-  return 0;
+  link_error();
+  return 2;
 }
 
-static void do_undo(void) {
+/* Manda NEW_GAME e, se l'umano e' nero, consuma l'apertura del computer.
+ * Ricostruisce anche la board locale: e' sempre uno stato noto.
+ * Ritorna 0 ok, 1 partita finita subito, 2 errore di link. */
+static unsigned char start_new_game(void) {
+  histN = 0;
+  new_board_local();
+  drain_link();
+  if (comm_tx_byte(CMD_NEW_GAME) != 0) { link_error(); return 2; }
+  (void)wait_ack();
+  if (humanColor != BLACK) return 0;
+  return recv_engine_move();
+}
+
+/* Riallinea la UI allo stato vero dell'ESP32 senza buttare la partita:
+ * (ri)invia colore e livello (copre anche un reboot dell'ESP32), chiede lo
+ * storico mosse (GET_HIST) e ricostruisce la board locale; se dopo il resync
+ * tocca al computer lo fa muovere (GO).
+ * Ritorna 1 se la partita puo' continuare, 0 su errore di link. */
+static unsigned char resync_board(void) {
+  unsigned int  n, i, m;
+  int           b;
+
+  drain_link();
+  if (comm_tx_byte(CMD_SET_COLOR) != 0 ||
+      comm_tx_byte(humanColor) != 0) return 0;
+  (void)wait_ack();
+  if (comm_tx_byte(CMD_SET_LEVEL) != 0 ||
+      comm_tx_byte(level) != 0) return 0;
+  (void)wait_ack();
+  if (comm_tx_byte(CMD_GET_HIST) != 0) return 0;
+
+  b = comm_rx_byte(RX_TIMEOUT_BYTE);
+  if (b != RSP_HIST) { link_error(); return 0; }
+  b = comm_rx_byte(RX_TIMEOUT_BYTE); if (b < 0) { link_error(); return 0; }
+  n = (unsigned int)b;
+  b = comm_rx_byte(RX_TIMEOUT_BYTE); if (b < 0) { link_error(); return 0; }
+  n |= (unsigned int)b << 8;
+  if (n > 400) { link_error(); return 0; }
+
+  histN = 0;
+  new_board_local();
+  for (i = 0; i < n; i++) {
+    b = comm_rx_byte(RX_TIMEOUT_BYTE); if (b < 0) { link_error(); return 0; }
+    m = (unsigned int)b;
+    b = comm_rx_byte(RX_TIMEOUT_BYTE); if (b < 0) { link_error(); return 0; }
+    m |= (unsigned int)b << 8;
+    apply_move_local(m);
+    hist[histN++] = m;
+  }
+
+  if (lside != humanColor) {            /* tocca al computer: falla muovere */
+    if (comm_tx_byte(CMD_GO) != 0) { link_error(); return 0; }
+    if (recv_engine_move() == 2) return 0;
+  }
+  return 1;
+}
+
+/* Ritorna 0 ok, 1 se il collegamento e' morto (game_loop deve uscire). */
+static unsigned char do_undo(void) {
   unsigned int i;
   if (histN < 2) {
     textcolor(COLOR_LIGHTRED);
     cprintf("nothing to undo\r\n");
-    return;
+    return 0;
   }
-  comm_rx_flush();
-  comm_tx_byte(CMD_UNDO);
-  if (!wait_ack()) {
-    /* l'ESP32 ha comunque eseguito l'UNDO: ricostruiamo anche noi */
-    textcolor(COLOR_LIGHTRED);
-    cprintf("link timeout\r\n");
+  if (comm_tx_byte(CMD_UNDO) != 0) {
+    link_error();
+    return resync_board() ? 0 : 1;
   }
+  (void)wait_ack();
+
   histN -= 2;
   new_board_local();
   for (i = 0; i < histN; i++) apply_move_local(hist[i]);
+  return 0;
 }
 
 /* ================================================================== */
@@ -393,12 +463,11 @@ static void game_loop(void) {
     read_line(buf, 8);
 
     if (buf[0] == '.') {                  /* esci */
-      comm_tx_byte(CMD_QUIT);
-      wait_ack();
+      if (comm_tx_byte(CMD_QUIT) == 0) (void)wait_ack();
       return;
     }
     if (buf[0] == 'u' || buf[0] == 'U') { /* undo */
-      do_undo();
+      if (do_undo()) return;
       continue;
     }
     {
@@ -421,7 +490,12 @@ static void game_loop(void) {
         continue;
       }
 
-      send_move(m);
+      comm_rx_flush();
+      if (send_move(m) != 0) {            /* l'ESP32 non ha confermato: resync */
+        link_error();
+        if (!resync_board()) return;
+        continue;
+      }
       rsp = comm_rx_byte(RX_TIMEOUT_CMD);
 
       if (rsp == RSP_ILLEGAL) {
@@ -432,19 +506,26 @@ static void game_loop(void) {
       if (rsp == RSP_GAME_OVER) {         /* l'umano ha chiuso la partita */
         if (!read_over_tail(&reason, &winner)) return;
         show_game_over(reason, winner);
-        return;
+        if (!g_wantNew || start_new_game() != 0) return;
+        continue;
       }
       if (rsp == RSP_BEST_MOVE) {         /* partita che prosegue */
         apply_move_local(m);
         if (histN < 400) hist[histN++] = m;
         rc = recv_best_payload();
-        if (rc == 1) return;
-        if (rc == 2 && start_new_game() != 0) return;
+        if (rc == 2) {
+          link_error();
+          if (!resync_board()) return;
+          continue;
+        }
+        if (rc == 1) {                    /* show_game_over ha chiesto nuova/esci */
+          if (!g_wantNew || start_new_game() != 0) return;
+        }
+        continue;
       }
-      if (rsp < 0) {                      /* timeout: prova a risincronizzare */
-        link_error();
-        if (start_new_game() != 0) return;
-      }
+      /* risposta ignota o assente: protocollo sfasato, non prosegue a vuoto */
+      link_error();
+      if (!resync_board()) return;
     }
   }
 }
@@ -477,10 +558,24 @@ int main(void) {
   cputc(c);
   cprintf("\r\n");
 
-  comm_tx_byte(CMD_SET_COLOR); comm_tx_byte(humanColor); (void)wait_ack();
-  comm_tx_byte(CMD_SET_LEVEL); comm_tx_byte(level);      (void)wait_ack();
+  if (comm_tx_byte(CMD_SET_COLOR) != 0 || comm_tx_byte(humanColor) != 0 ||
+      comm_tx_byte(CMD_SET_LEVEL) != 0 || comm_tx_byte(level) != 0) {
+    textcolor(COLOR_LIGHTRED);
+    cprintf("\r\nLINK ERROR\r\n");
+    return 1;
+  }
+  (void)wait_ack();
+  (void)wait_ack();
 
-  if (start_new_game()) return 0;
+  {
+    unsigned char rc = start_new_game();
+    while (rc == 1) {           /* partita finita subito: la scelta nuova/esci
+                                   e' gia' stata chiesta da show_game_over */
+      if (!g_wantNew) return 0;
+      rc = start_new_game();
+    }
+    if (rc == 2) return 1;
+  }
 
   game_loop();
   return 0;

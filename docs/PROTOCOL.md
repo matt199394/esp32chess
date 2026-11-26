@@ -58,6 +58,8 @@ Tutti i comandi sono **1 byte + eventuali parametri**; tutte le risposte sono
 | `MOVE`      | `0x4D` 'M' | 2 byte: mossa lo, hi | mossa dell'umano |
 | `UNDO`      | `0x55` 'U' | — | ritira la coppia di mosse |
 | `QUIT`      | `0x51` 'Q' | — | fine / torna al menu |
+| `GET_HIST`  | `0x47` 'G' | — | chiede lo storico mosse (resync) |
+| `GO`        | `0x45` 'E' | — | muovi se è il turno del computer, altrimenti `ACK` |
 
 ### ESP32 → C64
 
@@ -67,6 +69,7 @@ Tutti i comandi sono **1 byte + eventuali parametri**; tutte le risposte sono
 | `0x01` | `ACK`       | — | conferma (`NEW_GAME`/`SET_*`/`UNDO`/`QUIT`) |
 | `0x02` | `BEST_MOVE` | mossa lo, mossa hi, score lo, score hi, depth (u8), flags (u8) | risposta del computer |
 | `0x03` | `GAME_OVER` | reason (u8), winner (u8) | fine partita |
+| `0x04` | `HIST`      | n lo, n hi, poi n mosse (lo, hi) | storico completo della partita |
 
 ### Codifica mossa (16 bit, identica su entrambi i lati)
 
@@ -103,3 +106,19 @@ insufficiente.
    - `ILLEGAL` → l'umano ripete;
    - `GAME_OVER` → l'umano ha chiuso la partita (matto/stallo/patta);
    - `BEST_MOVE` → mossa del computer (ed eventuale `GAME_OVER` in coda).
+
+## Resync dopo un errore di collegamento
+
+Ogni byte C64→ESP32 è confermato dall'ESP32 (abbassa D7 quando l'ISR ha
+catturato il byte): `comm_tx_byte` attende l'ack e ritorna errore se non
+arriva. Alla prima anomalia (tx fallito, risposta ignota, timeout) la UI:
+
+1. svuota il collegamento (`drain_link`: consuma i byte in volo finché non
+   arriva silenzio);
+2. reinvia `SET_COLOR` e `SET_LEVEL` (copre anche un reboot dell'ESP32);
+3. manda `GET_HIST` e ricostruisce board locale e storico dalla risposta
+   `HIST` (lo stato vero è sempre quello dell'ESP32);
+4. se dopo il resync tocca al computer, manda `GO` e ne consuma la risposta.
+
+La partita così non si perde: dopo un errore si continua dalla posizione
+vera invece di ricominciare o di uscire in silenzio a BASIC.

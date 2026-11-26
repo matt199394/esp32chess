@@ -11,12 +11,15 @@
 #define CMD_MOVE      0x4D   /* 'M' + 2 byte: mossa lo, hi */
 #define CMD_UNDO      0x55   /* 'U' */
 #define CMD_QUIT      0x51   /* 'Q' */
+#define CMD_GET_HIST  0x47   /* 'G' - risponde con lo storico mosse (resync) */
+#define CMD_GO        0x45   /* 'E' - muovi se e' il turno del computer */
 
 /* ---- risposte ESP32 -> C64 ---- */
 #define RSP_ILLEGAL   0x00
 #define RSP_ACK       0x01
 #define RSP_BEST_MOVE 0x02   /* + mossa lo, mossa hi, score lo, score hi, depth, flags */
 #define RSP_GAME_OVER 0x03   /* + reason, winner */
+#define RSP_HIST      0x04   /* + n lo, n hi, poi n mosse (2 byte ciascuna) */
 
 /* ---- reason di GAME_OVER ---- */
 #define OVER_MATE       1

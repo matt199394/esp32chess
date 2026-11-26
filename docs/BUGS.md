@@ -1,15 +1,76 @@
 # Bug: `chessui` si blocca dopo N mosse
 
-**Stato: PARZIALMENTE RISOLTO — fix statici applicati, da confermare su
-hardware reale.**
-Ultimo aggiornamento: sessione di correzione.
+**Stato: RISOLTO (con conferme parziali da hardware) + seconda tornata di
+fix dopo i test su hardware.**
+Ultimo aggiornamento: sessione di correzione 2.
 
 Questa nota raccoglie i sintomi, l'analisi statica del codice e le ipotesi
 sul guasto.
 
 ---
 
-## 0. Correzioni applicate (sessione di correzione)
+## 0-bis. Report da hardware (sessione 2) e nuove correzioni
+
+### Sintomi osservati su hardware reale
+
+1. Il blocco originario non compare più (fix della sezione 0 confermati).
+2. Primo falso allarme: mosse rifiutate — era **scacco**: con il re sotto
+   scacco resta una sola mossa legale, le altre sono correttamente rifiutate
+   (`ILLEGAL`). Comportamento corretto.
+3. Dopo alcune mosse successive: **schermo blu con READY senza cursore**,
+   cioè il programma era **uscito del tutto** (tornato a BASIC).
+
+### Analisi
+
+`READY` su schermo blu = BASIC dopo la fine del programma. I percorsi che
+portano lì senza spiegazione erano:
+
+- **Perdita di byte C64→ESP32 (causa scatenante più probabile):** dopo
+  `STA $DE00` il C64 ripollava `$DF00` dopo ~25 µs; se l'ISR dell'ESP32
+  tarda (latenza interrupt, cache miss), il C64 vedeva ancora D7 alto
+  ("pronto") e scriveva il byte successivo prima che il precedente fosse
+  catturato → byte perso/comandì uniti → l'ESP32 non risponde → timeout
+  lato C64 → uscita.
+- **`start_new_game()` non ricostruiva la board locale:** dopo un resync la
+  UI restava sulla posizione vecchia mentre l'ESP32 ripartiva da quella
+  iniziale → desync permanente della copia display.
+- **Uscite silenziose:** fallimenti di tx/ack nel menu e a fine partita
+  riportavano a BASIC senza messaggio; a fine partita il programma usciva
+  sempre invece di proporre una nuova partita.
+- **Risposta ignota in `game_loop`:** un byte sfasato veniva ignorato in
+  silenzio (nessun ramo dell'if corrispondeva) e la partita proseguiva
+  desincronizzata.
+
+### Correzioni (sessione 2)
+
+- `c64/comm.s`: `comm_tx_byte` ora **attende l'ack** (l'ISR dell'ESP32
+  abbassa D7 quando ha catturato il byte, finestra garantita dalla durata
+  dello shiftIn) con timeout ~50 ms; ritorna `0`/`-1`. Senza l'ack la gara
+  sopra non è evitabile via software.
+- `c64/chessui.c`: ogni invio controlla l'esito del tx; qualunque risposta
+  ignota/assente è trattata come errore di collegamento (niente più
+  percorsi silenziosi).
+- **Nuovi comandi di protocollo** (`protocol.h` su entrambi i lati,
+  `docs/PROTOCOL.md`): `GET_HIST` (`0x47`) → risposta `HIST` (`0x04`: n lo,
+  n hi, n mosse lo/hi) e `GO` (`0x45`: muovi se è il turno del computer).
+  La procedura `resync_board()` della UI: drain dei byte in volo, reinvio
+  `SET_COLOR`/`SET_LEVEL` (copre anche un reboot dell'ESP32), `GET_HIST` e
+  ricostruzione di board locale e storico, `GO` se tocca al computer.
+  **La partita non si perde più dopo un errore di collegamento.**
+- `esp32/esp32.ino`: `handleMove` risponde `ILLEGAL` anche se un parametro
+  va in timeout (prima taceva e il C64 attendeva); gestori `GET_HIST`/`GO`.
+- Fine partita: `show_game_over` chiede `N = new game, Q = quit` invece di
+  uscire a BASIC.
+
+### Da verificare su hardware
+
+- Se lo schermo blu con READY ricompare senza nessun messaggio, sospettare
+  un **reboot dell'ESP32** (che resetta anche il C64 via `oC64RST`): in quel
+  caso collegare il monitor seriale USB e leggere il motivo (panic/watchdog).
+
+---
+
+## 0. Correzioni applicate (sessione 1)
 
 ### Timeout + resync in `comm_rx_byte` (sezione 2, H4)
 

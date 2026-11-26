@@ -54,7 +54,13 @@ _comm_install:
         rts
 
 ; ---------------------------------------------------------------------------
-; void __fastcall__ comm_tx_byte(unsigned char b)    ; b in A
+; int __fastcall__ comm_tx_byte(unsigned char b)     ; b in A
+;   Attende l'ESP32 pronto ($DF00 bit 7 alto), scrive b su $DE00 e attende
+;   l'ack: l'ISR dell'ESP32 abbassa D7 quando ha catturato il byte.
+;   L'ack e' indispensabile: senza, se l'ISR dell'ESP32 tarda il C64 vede
+;   ancora bit 7 alto e scrive il byte successivo prima che il precedente
+;   sia stato catturato (byte perso, protocollo sfasato per sempre).
+;   Ritorna 0 ok, -1 se l'ack non arriva entro ~50 ms.
 ; ---------------------------------------------------------------------------
 _comm_tx_byte:
         sta _comm_tx_tmp
@@ -62,6 +68,19 @@ _comm_tx_byte:
         bpl @w                          ; attende bit 7 alto (pronto)
         lda _comm_tx_tmp
         sta $de00
+        ldy #20                         ; timeout ack: 20 x ~2.9 ms
+@ack:   ldx #0
+@ack2:  lda $df00
+        bpl @acked                      ; bit 7 basso: byte catturato
+        inx
+        bne @ack2
+        dey
+        bne @ack
+        lda #$ff
+        ldx #$ff
+        rts
+@acked: lda #0
+        tax
         rts
 
 ; ---------------------------------------------------------------------------

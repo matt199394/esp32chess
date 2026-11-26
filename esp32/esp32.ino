@@ -213,6 +213,18 @@ static void sendGameOver(uint8_t over) {
   linkWriteByte(winnerOf(over));
 }
 
+/* Storico completo: serve alla UI per ricostruire la board locale dopo un
+ * errore di collegamento (resync) senza buttare la partita. */
+static void sendHist(void) {
+  linkWriteByte(RSP_HIST);
+  linkWriteByte((uint8_t)(gameHistN & 0xFF));
+  linkWriteByte((uint8_t)((gameHistN >> 8) & 0xFF));
+  for (u16 i = 0; i < gameHistN; i++) {
+    linkWriteByte((uint8_t)(gameHist[i] & 0xFF));
+    linkWriteByte((uint8_t)((gameHist[i] >> 8) & 0xFF));
+  }
+}
+
 /* Pensa, applica e invia la mossa del computer (BEST_MOVE + eventuale
  * GAME_OVER in coda). */
 static void sendBestMove(void) {
@@ -273,7 +285,12 @@ static void handleMove(void) {
   int lo = linkReadByte(2000);
   int hi = linkReadByte(2000);
   DBG("MOVE: lo=%d hi=%d\n", lo, hi);
-  if (lo < 0 || hi < 0) { DBG("MOVE: timeout sui byte\n"); return; }
+  if (lo < 0 || hi < 0) {
+    /* parametro perso: senza risposta il C64 attenderebbe per sempre */
+    DBG("MOVE: timeout sui byte\n");
+    linkWriteByte(RSP_ILLEGAL);
+    return;
+  }
   u16 m = (u16)(lo | (hi << 8));
   DBG("MOVE: m=0x%04X\n", (unsigned)m);
 
@@ -312,6 +329,20 @@ static void handleQuit(void) {
   linkWriteByte(RSP_ACK);
 }
 
+static void handleGetHist(void) {
+  sendHist();
+}
+
+/* Se e' il turno del computer muove (dopo un resync o all'avvio da UI);
+ * altrimenti conferma soltanto. */
+static void handleGo(void) {
+  if ((uint8_t)side == humanColor) {
+    linkWriteByte(RSP_ACK);
+    return;
+  }
+  sendBestMove();
+}
+
 static void dispatch(uint8_t cmd) {
   DBG("[chess] CMD %d (0x%02X)\n", (int)cmd, (int)cmd);
   switch (cmd) {
@@ -321,6 +352,8 @@ static void dispatch(uint8_t cmd) {
     case CMD_MOVE:      handleMove();     break;
     case CMD_UNDO:      handleUndo();     break;
     case CMD_QUIT:      handleQuit();     break;
+    case CMD_GET_HIST:  handleGetHist();  break;
+    case CMD_GO:        handleGo();       break;
     default: break;                       /* comando ignoto: ignora */
   }
 }
