@@ -101,7 +101,7 @@ _comm_rx_byte:
         ror _rx_tmo
         lsr _rx_tmo+1
         ror _rx_tmo
-        lda $a1                         ; jiffy clock del KERNAL (60 Hz)
+        lda $a2                         ; byte basso del jiffy clock (1/60 s)
         sta _rx_last
         lda #0
         sta _rx_cnt
@@ -112,7 +112,7 @@ _comm_rx_byte:
         lda _rx_tmo
         ora _rx_tmo+1
         beq @wait                       ; timeout 0: attesa infinita
-        lda $a1
+        lda $a2
         cmp _rx_last
         beq @wait
         sta _rx_last
