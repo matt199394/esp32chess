@@ -301,14 +301,16 @@ static void sid_wait(u8 j)
     while ((u32)clock() < t) {}
 }
 
-/* nota singola: f = frequency word, wave = forma d'onda senza gate,
-   jfy = jiffy di gate. Sustain pieno e release breve: suono pieno che
-   sfuma invece di troncarsi di netto. */
+/* nota singola: f = frequency word, wave = forma d'onda SENZA il bit di
+   gate (0x01), jfy = jiffy di gate. Sustain pieno e release breve: suono
+   pieno che sfuma invece di troncarsi di netto. */
 static void sid_note(u16 f, u8 wave, u8 jfy)
 {
     POKE(0xD418, 0x0F);            /* volume massimo */
     POKE(0xD405, 0x00);            /* attacco immediato */
     POKE(0xD406, 0xF3);            /* sustain 15, release breve */
+    POKE(0xD402, 0x00);            /* pulse width 50% (solo onda impulso) */
+    POKE(0xD403, 0x08);
     POKE(0xD400, (u8)(f & 0xFF));
     POKE(0xD401, (u8)(f >> 8));
     POKE(0xD404, (u8)(wave | 0x01));  /* gate on */
@@ -320,35 +322,35 @@ static void sid_note(u16 f, u8 wave, u8 jfy)
 static void sfx_move(u8 capture)
 {
     if (capture) {
-        sid_note(0x218A, 0x11, 8);     /* triangle C5 */
-        sid_note(0x0862, 0x11, 10);    /* triangle C3: tonfo */
+        sid_note(0x218A, 0x10, 8);     /* triangle C5 */
+        sid_note(0x0862, 0x10, 10);    /* triangle C3: tonfo */
     } else {
-        sid_note(0x4313, 0x11, 6);     /* triangle C6: tick */
+        sid_note(0x4313, 0x10, 6);     /* triangle C6: tick */
     }
 }
 
 /* errore: due tonfi gravi in onda quadra */
 static void sfx_error(void)
 {
-    sid_note(0x070D, 0x41, 7);
+    sid_note(0x070D, 0x40, 7);
     sid_wait(2);
-    sid_note(0x070D, 0x41, 7);
+    sid_note(0x070D, 0x40, 7);
 }
 
 /* scacco: doppio beep acuto */
 static void sfx_check(void)
 {
-    sid_note(0x2A41, 0x41, 5);
+    sid_note(0x2A41, 0x40, 5);
     sid_wait(2);
-    sid_note(0x2A41, 0x41, 5);
+    sid_note(0x2A41, 0x40, 5);
 }
 
 /* fine partita: tre note discendenti */
 static void sfx_gameover(void)
 {
-    sid_note(0x218A, 0x11, 10);
-    sid_note(0x1920, 0x11, 10);
-    sid_note(0x10C5, 0x11, 14);
+    sid_note(0x218A, 0x10, 10);
+    sid_note(0x1920, 0x10, 10);
+    sid_note(0x10C5, 0x10, 14);
 }
 
 /* ================================================================== */
