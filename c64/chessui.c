@@ -80,6 +80,9 @@ static const unsigned char promoType[4] = { KNIGHT, BISHOP, ROOK, QUEEN };
 #define CHECK_ROW  8
 #define TIME_YOU_ROW 10
 #define TIME_AI_ROW  11
+#define HIST_HEAD    12
+#define HIST_ROW     13
+#define HIST_ROWS    7
 #define PROMPT_ROW 20
 #define MSG_ROW    21
 #define OVER_ROW   22
@@ -110,6 +113,8 @@ static s16 aiScore;
 static u8 aiDepth;
 static u8 checkFlag;                /* 0 = nessuno, 1 = sei sotto scacco,
                                        2 = la tua mossa ha dato scacco */
+static u8 drawNote;                 /* 0 = nessuna, 1 = 50 mosse,
+                                       2 = posizione ripetuta (reclamabili) */
 static u8 emptyBoard;               /* 1 = scacchiera senza pezzi (menu) */
 static u8 g_wantNew;                /* scelta dell'utente a fine partita */
 
@@ -640,7 +645,53 @@ static void show_status(void)
 
     if (checkFlag == 1) scr_puts(0, CHECK_ROW, "SCACCO!", COLOR_LIGHTRED);
     else if (checkFlag == 2) scr_puts(0, CHECK_ROW, "SCACCO!", COLOR_YELLOW);
+    else if (drawNote == 1) scr_puts(0, CHECK_ROW, "50 MOSSE", COLOR_YELLOW);
+    else if (drawNote == 2) scr_puts(0, CHECK_ROW, "RIPETIZIONE", COLOR_YELLOW);
     else scr_blank(0, CHECK_ROW, PANEL_W, COLOR_BLACK);
+}
+
+/* ================================================================== */
+/* cronologia mosse (colonna sinistra): coppie "12.e2e4 e7e5",         */
+/* scorre sulle ultime 2*HIST_ROWS semimosse                           */
+/* ================================================================== */
+
+static void show_history(void)
+{
+    char line[14];
+    u16 npairs, first, pn, wi, bi;
+    u8 row, pos, num;
+
+    scr_puts(0, HIST_HEAD, "MOSSE u=ind", COLOR_WHITE);
+    for (row = 0; row < HIST_ROWS; row++)
+        scr_blank(0, HIST_ROW + row, PANEL_W, COLOR_BLACK);
+
+    npairs = (u16)((histN + 1) >> 1);
+    first = (npairs > HIST_ROWS) ? (u16)(npairs - HIST_ROWS) : 0;
+
+    for (pn = first; pn < npairs; pn++) {
+        row = (u8)(pn - first);
+        pos = 0;
+        num = (u8)(pn + 1);
+        if (num >= 100) line[pos++] = (char)('0' + num / 100);
+        if (num >= 10)  line[pos++] = (char)('0' + (num / 10) % 10);
+        line[pos++] = (char)('0' + num % 10);
+        line[pos++] = '.';
+        wi = (u16)(pn * 2);
+        bi = (u16)(pn * 2 + 1);
+        line[pos++] = (char)('a' + (M_FROM(hist[wi]) & 7));
+        line[pos++] = (char)('1' + (M_FROM(hist[wi]) >> 4));
+        line[pos++] = (char)('a' + (M_TO(hist[wi]) & 7));
+        line[pos++] = (char)('1' + (M_TO(hist[wi]) >> 4));
+        if (bi < histN) {
+            line[pos++] = ' ';
+            line[pos++] = (char)('a' + (M_FROM(hist[bi]) & 7));
+            line[pos++] = (char)('1' + (M_FROM(hist[bi]) >> 4));
+            line[pos++] = (char)('a' + (M_TO(hist[bi]) & 7));
+            line[pos++] = (char)('1' + (M_TO(hist[bi]) >> 4));
+        }
+        line[pos] = 0;
+        scr_puts(0, HIST_ROW + row, line, COLOR_WHITE);
+    }
 }
 
 /* ================================================================== */
@@ -698,6 +749,7 @@ static void ui_apply_move(u16 m)
     joyFrom = 0xFF;
     joyCursor = 0xFF;
     checkFlag = 0;
+    drawNote = 0;
     sfx_move(capture);
 
     drawnN = 0;
@@ -1006,7 +1058,7 @@ static unsigned char read_over_tail(unsigned char *reason, unsigned char *winner
  * partita). Il programma NON esce piu' in silenzio a BASIC dopo la partita. */
 static void show_game_over(u8 reason, u8 winner) {
     static const char *rtxt[5] = {
-        "SCACCO MATTO", "STALLO", "50 MOSSE", "RIPETIZIONE", "MATERIALE"
+        "SCACCO MATTO", "STALLO", "75 MOSSE", "RIPETIZIONE", "MATERIALE"
     };
     char c;
 
@@ -1058,10 +1110,17 @@ static unsigned char recv_best_payload(void) {
 
     aiScore = (s16)score;
     aiDepth = depth;
-    checkFlag = (u8)(flags & F_CHECK);
 
     ui_apply_move(m);
     if (histN < 400) hist[histN++] = m;
+    show_history();
+
+    /* DOPO ui_apply_move: la mossa azzera checkFlag/drawNote, il flag del
+     * protocollo deve quindi venir applicato dopo (era il bug dello
+     * "SCACCO!" che non compariva quando eri tu sotto scacco) */
+    checkFlag = (u8)(flags & F_CHECK);
+    if (flags & F_DRAW50)       drawNote = 1;
+    else if (flags & F_DRAWREP) drawNote = 2;
 
     aiMove[0] = (char)('a' + (M_FROM(m) & 7));
     aiMove[1] = (char)('1' + (M_FROM(m) >> 4));
@@ -1122,6 +1181,7 @@ static unsigned char start_new_game(void) {
     drain_link();
     if (comm_tx_byte(CMD_NEW_GAME) != 0) { link_error(); return 2; }
     (void)wait_ack();
+    show_history();
     if (humanColor != BLACK) return 0;
     return recv_engine_move();
 }
@@ -1170,9 +1230,11 @@ static unsigned char resync_board(void) {
     }
     hasAiMove = 0;
     checkFlag = 0;
+    drawNote = 0;
     joyFrom = 0xFF;
     joyCursor = 0xFF;
     draw_board();
+    show_history();
     show_status();
     show_timers();
 
@@ -1208,7 +1270,9 @@ static unsigned char do_undo(void) {
     }
     hasAiMove = 0;
     checkFlag = 0;
+    drawNote = 0;
     draw_board();
+    show_history();
     show_status();
     show_timers();
     return 0;
@@ -1218,7 +1282,7 @@ static unsigned char do_undo(void) {
 /* loop di gioco                                                       */
 /* ================================================================== */
 
-static void game_loop(void) {
+static u8 game_loop(void) {
     u16 m;
     u8 from, p, reason, winner, rc;
     int rsp;
@@ -1230,10 +1294,10 @@ static void game_loop(void) {
 
         if (m == MOVE_NONE) {                 /* '.' o RUN-STOP: esci */
             if (comm_tx_byte(CMD_QUIT) == 0) (void)wait_ack();
-            return;
+            return 0;
         }
         if (m == MOVE_UNDO) {                 /* 'u': annulla l'ultimo turno */
-            if (do_undo()) return;
+            if (do_undo()) return 0;
             continue;
         }
 
@@ -1251,7 +1315,7 @@ static void game_loop(void) {
         comm_rx_flush();
         if (send_move(m) != 0) {   /* l'ESP32 non ha confermato: resync */
             link_error();
-            if (!resync_board()) return;
+            if (!resync_board()) return 0;
             continue;
         }
 
@@ -1265,7 +1329,7 @@ static void game_loop(void) {
             int f = comm_rx_byte(RX_TIMEOUT_BYTE);
             if (f < 0) {
                 link_error();
-                if (!resync_board()) return;
+                if (!resync_board()) return 0;
                 continue;
             }
             if (f & F_CHECK) {                /* la tua mossa ha dato scacco */
@@ -1273,6 +1337,10 @@ static void game_loop(void) {
                 show_status();
                 sfx_check();
             }
+            /* patte reclamabili: solo avviso, la partita continua */
+            if (f & F_DRAW50)       drawNote = 1;
+            else if (f & F_DRAWREP) drawNote = 2;
+            if (drawNote) show_status();
             rsp = wait_rsp();                 /* poi GAME_OVER o BEST_MOVE */
         }
 
@@ -1289,27 +1357,27 @@ static void game_loop(void) {
         }
         if (rsp == RSP_GAME_OVER) {           /* l'umano ha chiuso la partita */
             if (histN < 400) hist[histN++] = m;
-            if (!read_over_tail(&reason, &winner)) return;
+            show_history();
+            if (!read_over_tail(&reason, &winner)) return 0;
             show_game_over(reason, winner);
-            if (!g_wantNew || start_new_game() != 0) return;
-            continue;
+            return (u8)(g_wantNew ? 1 : 0);
         }
         if (rsp == RSP_BEST_MOVE) {           /* partita che prosegue */
             if (histN < 400) hist[histN++] = m;
             rc = recv_best_payload();
             if (rc == 2) {
                 link_error();
-                if (!resync_board()) return;
+                if (!resync_board()) return 0;
                 continue;
             }
             if (rc == 1) {          /* show_game_over ha chiesto nuova/esci */
-                if (!g_wantNew || start_new_game() != 0) return;
+                return (u8)(g_wantNew ? 1 : 0);
             }
             continue;
         }
         /* risposta ignota o assente: protocollo sfasato, non prosegue a vuoto */
         link_error();
-        if (!resync_board()) return;
+        if (!resync_board()) return 0;
     }
 }
 
@@ -1368,33 +1436,36 @@ int main(void)
     segWho = SEG_PLAYER;
     segT0 = (u32)clock();
 
-    emptyBoard = 1;
-    draw_board();
-    emptyBoard = 0;
+    for (;;) {
+        /* menu principale: a fine partita N ripassa da qui (livello e
+         * colore vengono richiesti ogni volta) */
+        emptyBoard = 1;
+        draw_board();
+        emptyBoard = 0;
 
-    level = ask_level();
-    humanColor = ask_color();
-    flip = (humanColor == BLACK) ? 1 : 0;
+        level = ask_level();
+        humanColor = ask_color();
+        flip = (humanColor == BLACK) ? 1 : 0;
 
-    draw_board();
+        draw_board();
 
-    comm_rx_flush();
-    if (comm_tx_byte(CMD_SET_COLOR) != 0 || comm_tx_byte(humanColor) != 0 ||
-        comm_tx_byte(CMD_SET_LEVEL) != 0 || comm_tx_byte(level) != 0) {
-        link_error();
-        return 1;
-    }
-    (void)wait_ack();
-    (void)wait_ack();
+        comm_rx_flush();
+        if (comm_tx_byte(CMD_SET_COLOR) != 0 || comm_tx_byte(humanColor) != 0 ||
+            comm_tx_byte(CMD_SET_LEVEL) != 0 || comm_tx_byte(level) != 0) {
+            link_error();
+            return 1;
+        }
+        (void)wait_ack();
+        (void)wait_ack();
 
-    rc = start_new_game();
-    while (rc == 1) {           /* partita finita subito: la scelta nuova/esci
-                                   e' gia' stata chiesta da show_game_over */
-        if (!g_wantNew) return 0;
         rc = start_new_game();
+        if (rc == 2) return 1;
+        if (rc == 1) {          /* partita finita subito (es. apertura): la
+                                   scelta nuova/esci e' gia' stata chiesta */
+            if (!g_wantNew) return 0;
+            continue;               /* N: si ripassa dal menu */
+        }
+        /* 0 = Q/link morto: esci; 1 = game over + N: si riparte dal menu */
+        if (game_loop() == 0) return 0;
     }
-    if (rc == 2) return 1;
-
-    game_loop();
-    return 0;
 }

@@ -21,6 +21,7 @@
 #define RSP_GAME_OVER 0x03   /* + reason, winner */
 #define RSP_HIST      0x04   /* + n lo, n hi, poi n mosse (2 byte ciascuna) */
 #define RSP_MOVED     0x05   /* mossa dell'umano accettata: + flags (u8) */
+                               /*   flags: F_CHECK | F_DRAW50 | F_DRAWREP */
 
 /* ---- reason di GAME_OVER ---- */
 #define OVER_MATE       1
@@ -34,9 +35,11 @@
 #define WINNER_BLACK 1
 #define WINNER_DRAW  0xFF
 
-/* ---- flags di BEST_MOVE ---- */
+/* ---- flags di BEST_MOVE e RSP_MOVED ---- */
 #define F_CHECK    0x01
 #define F_GAMEOVER 0x02
+#define F_DRAW50   0x04   /* 50 mosse: patta reclamabile, la partita continua */
+#define F_DRAWREP  0x08   /* posizione ripetuta: patta reclamabile, continua */
 
 /* ---- livelli ---- */
 #define LEVEL_EASY   0

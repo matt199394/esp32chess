@@ -183,12 +183,25 @@ static uint8_t levelSeconds(uint8_t lv) {
 }
 
 static uint8_t gameOverReason(void) {
+  /* Chiudono la partita solo le patte AUTOMATICHE (matto, stallo, materiale
+   * insufficiente, regola dei 75 halfmove, ripetizione 5x). Le patte
+   * RECLAMABILI (50 halfmove, ripetizione 3x) non chiudono: sono segnalate
+   * alla UI con F_DRAW50/F_DRAWREP (vedi drawFlags), cosi' una partita
+   * ancora decisiva non si chiude all'improvviso con un "PATTA". */
   if (!has_legal_moves())
     return in_check() ? OVER_MATE : OVER_STALEMATE;
-  if (fifty_moves())          return OVER_50MOVE;
-  if (repetition_count() >= 2) return OVER_REPETITION;
+  if (halfmove >= 150)          return OVER_50MOVE;  /* regola dei 75 */
+  if (repetition_count() >= 4) return OVER_REPETITION;  /* 5 volte */
   if (insufficient_material()) return OVER_MATERIAL;
   return 0;
+}
+
+/* Patte reclamabili: solo segnalazione, la partita continua. */
+static uint8_t drawFlags(void) {
+  uint8_t f = 0;
+  if (halfmove >= 100)          f |= F_DRAW50;
+  if (repetition_count() >= 2) f |= F_DRAWREP;
+  return f;
 }
 
 static uint8_t winnerOf(uint8_t reason) {
@@ -247,6 +260,7 @@ static void sendBestMove(void) {
   if (in_check()) flags |= F_CHECK;  /* l'umano e' sotto scacco */
   uint8_t over = gameOverReason();
   if (over) flags |= F_GAMEOVER;
+  flags |= drawFlags();
 
   linkWriteByte(RSP_BEST_MOVE);
   linkWriteByte((uint8_t)(best & 0xFF));
@@ -310,7 +324,7 @@ static void handleMove(void) {
    * lo vede come risposta ignota ma la nuova lo gestisce) */
   uint8_t givesCheck = in_check_of((uint8_t)(side ^ 1));
   linkWriteByte(RSP_MOVED);
-  linkWriteByte(givesCheck ? F_CHECK : 0);
+  linkWriteByte((uint8_t)((givesCheck ? F_CHECK : 0) | drawFlags()));
 
   uint8_t over = gameOverReason();
   if (over) { sendGameOver(over); return; }

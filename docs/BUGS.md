@@ -351,3 +351,48 @@ da solo non spiega un blocco del C64.
 | `esp32/esp32.ino` | `busSendByte`, `busReadByte`, ISR `/I/O1` e `/I/O2` |
 | `esp32/chess.c` | bug latente `gamePly`/`keyHist` |
 | `docs/PROTOCOL.md` | contratto del protocollo |
+
+---
+
+## 0-quater. Report da hardware (sessione 5) e correzioni
+
+### Sintomi osservati su hardware reale
+
+1. La scritta "SCACCO!" **non compareva** quando era il re dell'umano a essere
+   sotto scacco (compariva solo quando era la mossa dell'umano a dare scacco).
+2. Partita vinta dall'AI (posizione finale di matto) chiusa invece con
+   "PATTA" per 50 mosse / ripetizione.
+3. Premendo `N` a fine partita si ripartiva **senza** ripassare dal menu
+   (livello e colore delle impostazioni precedenti).
+4. Richiesta funzionali: cronologia delle mosse e tornare indietro (undo).
+
+### Analisi e correzioni
+
+1. **SCACCO non mostrato:** in `recv_best_payload` il flag `F_CHECK` veniva
+   copiato in `checkFlag` **prima** di `ui_apply_move()`, che azzera
+   `checkFlag` (e blanca `CHECK_ROW`): l'avviso veniva cancellato subito.
+   Ora i flag di protocollo vengono applicati **dopo** la mossa.
+2. **Falso "PATTA":** verificato con test host che matto, stallo, 50 mosse e
+   ripetizione sono rilevati correttamente e che il matto ha la priorità
+   (nessun falso positivo di ripetizione su 2000 partite casuali con
+   confronto completo dello stato). La causa era che le patte *reclamabili*
+   (50 halfmove, triplica ripetizione) **chiudevano la partita in automatico**:
+   a livello FIDE sono reclamabili, non automatiche (automatiche sono 75
+   halfmove e la ripetizione 5 volte). Ora `gameOverReason()` chiude la
+   partita solo per matto/stallo/materiale/75 halfmove/ripetizione 5x; le
+   condizioni reclamabili arrivano come flag `F_DRAW50`/`F_DRAWREP` (in
+   `BEST_MOVE` e `MOVED`) e la UI le mostra come avviso senza chiudere.
+3. **Menu su `N`:** `game_loop` ritorna al chiamante con 1 = "nuova partita":
+   `main` riparte dal menu (livello e colore richiesti ogni volta) invece di
+   chiamare `start_new_game()` con le impostazioni correnti. `Q` esce sempre.
+4. **Cronologia + undo:** pannello "MOSSE" (righe 12..19) con le ultime 14
+   semimosse in coppie `12.e2e4 e7e5`; `u` al prompt annulla l'ultimo turno
+   (già supportato dal protocollo con `CMD_UNDO`).
+
+### Verifiche
+
+- Build cc65 pulita, BSS a `$48B2` (limite `$8400`).
+- Test host `/tmp/testend.c`: matto del contadino → reason=1/vincitore nero;
+  50 halfmove → reason=3 esattamente a 100; 3 giri di cavalli →
+  repetition_count=3; 2000 partite casuali → nessun falso positivo di
+  ripetizione (verifica per confronto completo dello stato).

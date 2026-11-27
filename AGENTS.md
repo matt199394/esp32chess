@@ -16,7 +16,13 @@ c64esp32cart), il **C64 fa solo da UI** (scacchiera, tastiera, testo, suoni).
 - **FATTO** trasporto C64: `comm.s` (tx polling + rx via NMI, ring buffer 16B).
 - **FATTO** UI C64 **grafica** 3×3-charset (da chess-alphabeta): scacchiera 24×24,
   pezzi glyph invertiti, pannello sinistro, effetti sonori SID, joystick port 2,
-  doppio timer (giocatore/AI), mossa del giocatore mostrata subito (snapshot/restore).
+  doppio timer (giocatore/AI), mossa del giocatore mostrata subito (snapshot/restore),
+  avviso "SCACCO!" (rosso = sei sotto scacco, giallo = hai dato scacco),
+  cronologia mosse a schermo + undo con `u`, fine partita con N = menu principale
+  (livello+colore riprodotti ogni volta) e Q = esci.
+- **NOTA** patte reclamabili (50 halfmove, triplica ripetizione) NON chiudono
+  la partita: arrivano come flag `F_DRAW50`/`F_DRAWREP` e sono mostrate come
+  avviso; chiudono solo matto/stallo/materiale/75 halfmove/ripetizione 5x.
 - **TODO** vedere "Prossimi passi" in fondo.
 
 ## Build (verificati in questa sessione)
