@@ -14,8 +14,10 @@ c64esp32cart), il **C64 fa solo da UI** (scacchiera, tastiera, testo, suoni).
 - **FATTO** trasporto ESP32: `Serial` (default, per test) + bus cartuccia
   (`-DUSE_C64_BUS`).
 - **FATTO** trasporto C64: `comm.s` (tx polling + rx via NMI, ring buffer 16B).
-- **FATTO** UI C64 **grafica** 3×3-charset (da chess-alphabeta): scacchiera 24×24,
-  pezzi glyph invertiti, pannello sinistro, effetti sonori SID, joystick port 2,
+- **FATTO** UI C64 **grafica** 3×3-caratteri: scacchiera 24×24 in charset
+  MULTICOLOR con i pezzi di "Don's Gambit" (bianco/nero solidi via $D022/$D023,
+  casa dal color RAM bit 3=1; testo hires con colori 0-7), pannello sinistro,
+  effetti sonori SID, joystick port 2,
   doppio timer (giocatore/AI), mossa del giocatore mostrata subito (snapshot/restore),
   avviso "SCACCO!" (rosso = sei sotto scacco, giallo = hai dato scacco),
   cronologia mosse a schermo + undo con `u`, fine partita con N = menu principale
@@ -57,7 +59,7 @@ esp32/
   chess.c/chess.h  motore (copiato da chess2026, non modificare senza perft)
   protocol.h       costanti protocollo (KEEP IN SYNC con c64/protocol.h)
 c64/
-  chessui.c        UI grafica 3×3-charset + macchina a stati
+  chessui.c        UI grafica multicolor (pezzi Don's Gambit) + macchina a stati
   font_writer.h    font 512B per il charset custom
   comm.s/comm.h    byte a byte $DE00/$DF00 + NMI ($0318, ring buffer 16B)
   protocol.h       costanti protocollo

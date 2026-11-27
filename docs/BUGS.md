@@ -663,3 +663,62 @@ emptyBoard=1) preparano `$8400`/`$8800` mentre il VIC mostra ancora lo
 schermo del BASIC (le scritture sono invisibili), POI flip di `$DD00`/`$D018`:
 il menu appare gia' completo, senza flash. Al primo giro del menu il
 ridisegno viene saltato (variabile `first`).
+
+---
+
+## Sessione 13 — Grafica pezzi "Don's Gambit" (charset multicolor)
+
+### Obiettivo
+
+Usare la grafica dei pezzi di *The Don's Gambit* (`dongambit.prg` +
+`dongambit.png`, riferimento aggiunto al branch) al posto dei glyph hires
+"solid/outline".
+
+### Analisi
+
+- Screenshot 1:1 (finestra VICE): scacchiera 192x192 px a (40,35),
+  24 px/casa = 3x3 caratteri, come il nostro layout.
+- Per ogni casa ci sono SOLO 2 colori (casa + pezzo); i pezzi sono
+  riempimenti SOLIDI (bianco su casa per i bianchi, nero su casa per i
+  neri), stessa forma per i due colori.
+- La vista e' ruotata (lato nero in basso, file h->a): la corona a 3 punte
+  e' la REGINA (d1), la forma con palla+corona e' il RE (e1). Torre a
+  a/h, cavallo b/g (con occhio e orecchio), alfiere c/f (mitra con taglio),
+  pedoni sulla seconda riga.
+- La ricerca dei dati raw nel .prg (hires, multicolor charset e bitmap,
+  sprite 24x21, flip/byte-reverse) non trova corrispondenze: i pezzi non
+  sono memorizzati come bitmap raw (probabilmente compressi o procedurali).
+  Non serve: il PNG e' una fonte pixel-perfect, i glyph si estraggono da li'.
+
+### Scelta tecnica: charset multicolor
+
+Il bianco SOLIDO su casa colorata esige il multicolor (in hires il pezzo
+bianco puo' essere solo contorno su $D021 nero). Modalita': `$D016` bit 4
+globale, con lo switch per carattere dato dal **bit 3 del color RAM**:
+
+- coppie `01` -> `$D022` = bianco (pezzi bianchi), `10` -> `$D023` = nero
+  (pezzi neri), `11` -> color RAM = colore casa;
+- caratteri con color RAM 0-7 restano HIRES: tutto il testo del pannello
+  resta normale, a 8 px, senza font riscritto. Unico vincolo: i colori del
+  TESTO devono stare in 0-7 (LIGHTRED -> RED per gli avvisi).
+
+### Cambi (V13)
+
+- `glyph_mc[2][6][9][8]` (864 B, generati da `dongambit.png`) sostituisce
+  `glyph_solid`/`glyph_outline`: bianchi da glyph 0x40, neri da 0x76,
+  9 caratteri per pezzo; blocco casa vuota spostato da 0xA0 a 0xE0
+  (tutte le coppie 11 = colore casa).
+- `$D016` bit 4 + `$D022` bianco + `$D023` nero al flip video di `main()`.
+- Colori casa (ora vincolati a 0-7): GIALLO/BLU al posto di GRAY3/BLU
+  (GRAY3 = 15 non e' rappresentabile come colore casa multicolor);
+  ultima mossa/selezione: CIANO (era giallo, ora coincide con le case
+  chiare); cursore joystick: VERDE (era ciano).
+- Marcatore di build: **V13**.
+
+### Verifica
+
+- Round-trip dei glyph contro il PNG (maschera quantizzata multicolor): OK.
+- Anteprima resa dalla tabella glyph: 12 forme riconoscibili, nessun
+  artefatto (dettagli da 1 px diventano da 2 px, limite fisico del MC).
+- Build cc65 senza warning; RODATA+BSS finiscono a $4B2F, molto sotto
+  $8400 (schermo).
