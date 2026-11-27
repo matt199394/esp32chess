@@ -722,3 +722,17 @@ globale, con lo switch per carattere dato dal **bit 3 del color RAM**:
   artefatto (dettagli da 1 px diventano da 2 px, limite fisico del MC).
 - Build cc65 senza warning; RODATA+BSS finiscono a $4B2F, molto sotto
   $8400 (schermo).
+
+### Aggiornamento: multicolor rimosso (V14)
+
+Su richiesta dell'utente il multicolor e' stato tolto. Le FORME dei pezzi
+"Don's Gambit" restano (stesso layout: neri da glyph 0x40, bianchi da 0x76,
+9 caratteri per pezzo, casa vuota a 0xE0), ma tornano in charset HIRES:
+
+- neri = riempimento solido esatto (bit 0 = pezzo su $D021 nero);
+- bianchi = contorno di 1 px del pezzo (il bianco pieno su casa colorata
+  in hires non e' rappresentabile); valutate anteprime "contorno puro"
+  vs "contorno + retino": il contorno puro e' risultato il piu' leggibile;
+- colori originali ripristinati: case GRAY3/BLU, ultima mossa GIALLO,
+  cursore CIANO, avvisi LIGHTRED, niente $D016/$D022/$D023.
+- Marcatore di build: **V14**. Build senza warning, BSS fine $4B1C.

@@ -1,5 +1,5 @@
 /* font "1-writer": solo i glyph 0x00-0x3F (testo) = 512 byte.
-   Il resto del charset viene azzerato; i pezzi multicolor sovrascrivono
+   Il resto del charset viene azzerato; i pezzi hires sovrascrivono
    0x40-0xAB e il blocco casa vuota sta a 0xE0. */
 static const unsigned char font_writer[512] = {
     0x18, 0x00, 0x3C, 0x66, 0x7E, 0x66, 0x00, 0x00, 0x00, 0x3C, 0x66, 0x7E, 0x66, 0x66, 0x00, 0x00,
