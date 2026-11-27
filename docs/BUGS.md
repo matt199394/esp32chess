@@ -637,3 +637,29 @@ lettere tracer A-H su `MSG_ROW`, `dump_cia()`/`dump_line()`,
 `kernal_reinit()` (HEAL/NOCLK) e le probe del clock P1-P5. Il marcatore di
 build a schermo passa a **V12** (i `.prg` precedenti si riconoscono cosi').
 `drain_link()` resta quello nuovo (deadline sul clock + `DRAIN_GUARD`).
+
+---
+
+## Sessione 12 — Flash di scacchiera malformata a RUN
+
+### Sintomo
+
+Appena RUN, per una frazione di secondo appare una scacchiera malformata,
+poi la schermata definitiva col menu. Assente nelle prime versioni.
+
+### Causa
+
+In `main()` la commutazione video (`$DD00` banca 2 + `$D018` schermo `$8400`,
+charset `$8800`) avveniva PRIMA di `install_charset()` e del primo
+`draw_board()`: nel lasso tra flip e primo clear/disegno (una frazione di
+secondo) il VIC mostrava la memoria non ancora inizializzata, che al re-RUN
+contiene i resti della scacchiera precedente. La finestra si era allungata
+con le probe V10-V11 inserite in mezzo.
+
+### Fix
+
+Ordine invertito: `install_charset()` e il primo `draw_board()` (menu,
+emptyBoard=1) preparano `$8400`/`$8800` mentre il VIC mostra ancora lo
+schermo del BASIC (le scritture sono invisibili), POI flip di `$DD00`/`$D018`:
+il menu appare gia' completo, senza flash. Al primo giro del menu il
+ridisegno viene saltato (variabile `first`).

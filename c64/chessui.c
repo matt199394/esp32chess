@@ -1441,16 +1441,14 @@ static u8 ask_color(void)
 
 int main(void)
 {
-    u8 rc;
+    u8 rc, first;
 
     POKE(0xD020, COLOR_BLACK);               /* bordo */
     POKE(0xD021, COLOR_BLACK);               /* sfondo */
-    POKE(0xDD00, (u8)((PEEK(0xDD00) & 0xFC) | 0x01));  /* banca VIC 2 */
-    POKE(0xD018, 0x13);                      /* schermo $8400, charset $8800 */
 
     comm_install();                          /* handler NMI al piu' presto */
-    install_charset();
-
+    install_charset();                       /* charset a $8800: finche' il VIC
+                                                resta in banca 0 non si vede */
     new_board_local();
     humanColor = WHITE;
     level = LEVEL_MEDIUM;
@@ -1461,12 +1459,27 @@ int main(void)
     segWho = SEG_PLAYER;
     segT0 = (u32)clock();
 
+    /* il menu si prepara in RAM ($8400) mentre a video c'e' ancora lo
+     * schermo del BASIC: al flip appare gia' completo, senza la flash di
+     * scacchiera malformata (che prima si vedeva finche' charset e screen
+     * non erano pronti dopo la commutazione di $D018) */
+    emptyBoard = 1;
+    draw_board();
+    emptyBoard = 0;
+    POKE(0xDD00, (u8)((PEEK(0xDD00) & 0xFC) | 0x01));  /* banca VIC 2 */
+    POKE(0xD018, 0x13);                      /* schermo $8400, charset $8800 */
+
+    first = 1;
     for (;;) {
         /* menu principale: a fine partita N ripassa da qui (livello e
-         * colore vengono richiesti ogni volta) */
-        emptyBoard = 1;
-        draw_board();
-        emptyBoard = 0;
+         * colore vengono richiesti ogni volta); al primo giro la schermata
+         * e' gia' pronta (disegnata prima del flip video) */
+        if (!first) {
+            emptyBoard = 1;
+            draw_board();
+            emptyBoard = 0;
+        }
+        first = 0;
 
         level = ask_level();
         humanColor = ask_color();
