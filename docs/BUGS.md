@@ -78,10 +78,11 @@ portano lì senza spiegazione erano:
 
 - `comm_rx_byte` ora ha firma `int comm_rx_byte(unsigned ms)` (0 = attesa
   infinita): attende al più `ms` millisecondi usando il **byte basso** del
-  jiffy clock del KERNAL (`$A2`, 1/60 s), poi **svuota il ring buffer** e
-  ritorna `-1` invece di bloccare il C64 per sempre. (La prima versione
-  leggeva `$A1`, che cambia ogni 256 jiffy: il timeout risultava ~256×
-  troppo lungo. Corretto in `$A2`.)
+  jiffy clock del KERNAL (`$A0`, incrementa ogni jiffy = 1/60 s), poi
+  **svuota il ring buffer** e ritorna `-1` invece di bloccare il C64 per
+  sempre. (La prima versione leggeva `$A1`, il byte centrale, che cambia
+  solo ogni 256 jiffy: il timeout risultava ~256× troppo lungo. Il byte
+  basso del clock è `$A0`; `$A2` è quello alto e cambia ogni ~18 minuti.)
 - Nuovo `comm_rx_flush()` per scartare i byte residui prima di inviare un
   comando (le letture tornano allineate al prossimo messaggio).
 - La UI gestisce i timeout: `wait_ack`, `recv_best_payload`, `read_over_tail`
