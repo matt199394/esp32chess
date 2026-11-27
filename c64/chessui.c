@@ -538,7 +538,7 @@ static void draw_board(void)
 
     scr_clear();
     scr_puts(0, 0, "ESP32CHESS", COLOR_WHITE);
-    scr_puts(11, 0, "V7", COLOR_WHITE);   /* marcatore build: se non appare,
+    scr_puts(11, 0, "V8", COLOR_WHITE);   /* marcatore build: se non appare,
                                               sulla C64 gira un .prg vecchio */
 
     for (f = 0; f < 8; f++)
@@ -1151,6 +1151,7 @@ static unsigned char recv_engine_move(void) {
     int r;
     unsigned char reason, winner;
 
+    scr_puts(6, MSG_ROW, "H", COLOR_WHITE);   /* tracer: dentro attesa mossa */
     r = wait_rsp();
     if (r < 0) { link_error(); return 2; }
     scr_blank(0, PROMPT_ROW, PANEL_W, COLOR_BLACK);
@@ -1180,10 +1181,17 @@ static unsigned char start_new_game(void) {
     segWho = SEG_PLAYER;
     draw_board();
 
+    /* tracer: lettere A-H su MSG_ROW per localizzare un eventuale freeze;
+     * la lettera piu' avanzata visibile = ultimo punto raggiunto */
+    scr_puts(0, MSG_ROW, "A", COLOR_WHITE);   /* prima di drain_link */
     drain_link();
+    scr_puts(1, MSG_ROW, "B", COLOR_WHITE);   /* drain finito */
     if (comm_tx_byte(CMD_NEW_GAME) != 0) { link_error(); return 2; }
-    (void)wait_ack();
+    scr_puts(2, MSG_ROW, "C", COLOR_WHITE);   /* NEW_GAME trasmesso */
+    if (wait_ack()) scr_puts(3, MSG_ROW, "D", COLOR_WHITE);
+    else            scr_puts(3, MSG_ROW, "E", COLOR_WHITE);
     show_history();
+    scr_puts(4, MSG_ROW, "F", COLOR_WHITE);
     if (humanColor != BLACK) return 0;
     return recv_engine_move();
 }
@@ -1289,6 +1297,7 @@ static u8 game_loop(void) {
     u8 from, p, reason, winner, rc;
     int rsp;
 
+    scr_puts(5, MSG_ROW, "G", COLOR_WHITE);   /* tracer: game_loop raggiunto */
     for (;;) {
         show_timers();
         seg_open(SEG_PLAYER);
