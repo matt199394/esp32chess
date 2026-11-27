@@ -61,13 +61,24 @@ _comm_install:
 ;   L'ack e' indispensabile: senza, se l'ISR dell'ESP32 tarda il C64 vede
 ;   ancora bit 7 alto e scrive il byte successivo prima che il precedente
 ;   sia stato catturato (byte perso, protocollo sfasato per sempre).
-;   Ritorna 0 ok, -1 se l'ack non arriva entro ~50 ms.
+;   Ritorna 0 ok, -1 se l'ESP32 non e' pronto entro ~58 ms (senza timeout
+;   l'attesa del pronto era INFINITA: con l'ESP32 assente/bloccato il C64
+;   si pianta senza nessun messaggio) o l'ack non arriva entro ~50 ms.
 ; ---------------------------------------------------------------------------
 _comm_tx_byte:
         sta _comm_tx_tmp
-@w:     lda $df00
-        bpl @w                          ; attende bit 7 alto (pronto)
-        lda _comm_tx_tmp
+        ldy #20                         ; timeout pronto: 20 x ~2.9 ms
+@w:     ldx #0
+@w2:    lda $df00
+        bmi @send                       ; bit 7 alto: ESP32 pronto
+        inx
+        bne @w2
+        dey
+        bne @w
+        lda #$ff                        ; mai pronto: niente risposta
+        ldx #$ff
+        rts
+@send:  lda _comm_tx_tmp
         sta $de00
         ldy #20                         ; timeout ack: 20 x ~2.9 ms
 @ack:   ldx #0

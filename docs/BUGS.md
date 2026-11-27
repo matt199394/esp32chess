@@ -399,3 +399,33 @@ da solo non spiega un blocco del C64.
   50 halfmove → reason=3 esattamente a 100; 3 giri di cavalli →
   repetition_count=3; 2000 partite casuali → nessun falso positivo di
   ripetizione (verifica per confronto completo dello stato).
+
+---
+
+## 0-quinquies. Blocco all'inizio partita (sessione 6)
+
+### Sintomo
+
+Con l'ultima UI il C64 si blocca appena scelta la partita (dopo il menu).
+
+### Analisi
+
+Il sospetto sul timeout su `$A0` non regge: `$A0` e' il byte basso del jiffy
+clock e ora i timeout scattano ai valori giusti (prima, con `$A1`, erano
+256x troppo lunghi; con `$A2` del commit intermedio, 65536x). I punti che
+POSSEVANO bloccare all'avvio erano due:
+
+1. **`comm_tx_byte` attendeva il "pronto" (D7 alto) SENZA timeout**: se
+   l'ESP32 non alza mai D7 (firmware senza `-DUSE_C64_BUS`, non riflashato,
+   bloccato o assente) il C64 si pianta alla prima trasmissione, cioe'
+   subito dopo il menu, senza alcun messaggio. Corretto: attesa del pronto
+   limitata a ~58 ms; se scadde, `comm_tx_byte` ritorna -1 e la UI mostra
+   LINK ERROR invece di bloccarsi.
+2. La versione intermedia `$A2`: un timeout di 100 ms diventava ~ore, quindi
+   `drain_link()` a inizio partita sembrava un freeze totale. Gia' corretto
+   in `$A0`.
+
+### Verifiche
+
+- Build cc65 pulita (BSS `$48B2`).
+- `esp32.ino` verificato alla sintassi con stub Arduino/gpio (`-DUSE_C64_BUS`).
