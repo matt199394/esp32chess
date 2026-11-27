@@ -1008,7 +1008,8 @@ static void link_error(void) {
  * tutto; il tetto DRAIN_GUARD copre il caso di clock fermo.
  * Prima il ritardo era "a loop contato" (2 x 40000 iterazioni = 7,1 s
  * misurati in VICE): un workaround per il clock creduto morto, che in
- * realta' era solo il byte sbagliato ($A0 invece di $A2, vedi BUGS.md). * Contatore a schermo (x=8, MSG_ROW) e limite FLOOD: se arrivano piu' di
+ * realta' era solo il byte sbagliato ($A0 invece di $A2, vedi BUGS.md).
+ * Contatore a schermo (x=8, MSG_ROW) e limite FLOOD: se arrivano piu' di
  * 200 byte l'ESP32 trasmette senza sosta e il drain non finirebbe mai. */
 static void drain_link(void) {
     u16 n = 0, guard;
