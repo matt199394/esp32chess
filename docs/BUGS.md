@@ -603,3 +603,29 @@ TUTTI OK
 
 Con `$A0` lo stesso test restava bloccato sul primo caso (solo il banner a
 schermo): la regressione vede il bug.
+
+---
+
+## Sessione 11 — Avvio: 9 s di attesa, causa `drain_link` "a loop contato"
+
+### Sintomo (hardware, build V11 + fix `$A2`)
+
+Con il fix `$A2` il tracer mostra **A** poi **K** (clock vivo, niente
+HEAL/NOCLK) e la partita parte, ma dopo **~9 secondi**.
+
+### Causa
+
+`drain_link()` ritardava con un loop contato (`2 x 40000` iterazioni di
+`drain_sink = PEEK(0x01)`), un workaround scritto quando si credeva il jiffy
+clock congelato. Misurato in VICE con lo stesso codice: **429 jiffies =
+7150 ms**. Sommati a probe, `draw_board()` e trasferimento si arriva ai ~9 s
+osservati. Non era colpa del link: era attesa morta.
+
+### Fix
+
+`drain_link()` ora misura l'attesa sul jiffy clock (`clock()` = `RDTIM`):
+`DRAIN_GAP_JFY = 3` jiffy (~50 ms) per passata, due passate = **~100 ms**;
+`DRAIN_GUARD = 20000` poll come tetto nel caso (non piu' atteso) di clock
+fermo, cosi' non si puo' tornare a un'attesa illimitata.
+
+Misura in VICE dello stesso codice: **6 jiffies = 100 ms** (era 429).

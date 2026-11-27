@@ -1000,20 +1000,26 @@ static void link_error(void) {
     scr_blank(0, OVER_KEY_ROW, PANEL_W, COLOR_BLACK);
 }
 
-static volatile u8 drain_sink;
+#define DRAIN_GAP_JFY 3u        /* ~50 ms di attesa per passata (jiffy 60 Hz) */
+#define DRAIN_GUARD   20000u    /* tetto di poll se il clock non ticchetta */
 
-/* Consuma i byte gia' arrivati + una coda in volo, SENZA dipendere dal
- * jiffy clock (due passate di poll separate da un ritardo a loop contato).
+/* Consuma i byte gia' arrivati + una coda in volo: due passate di poll
+ * separate da ~50 ms misurati sul jiffy clock (clock() = RDTIM). ~100 ms in
+ * tutto; il tetto DRAIN_GUARD copre il caso di clock fermo.
+ * Prima il ritardo era "a loop contato" (2 x 40000 iterazioni = 7,1 s
+ * misurati in VICE): un workaround per il clock creduto morto, che in
+ * realta' era solo il byte sbagliato ($A0 invece di $A2, vedi BUGS.md).
  * Contatore a schermo (x=8, MSG_ROW) e limite FLOOD: se arrivano piu' di
  * 200 byte l'ESP32 trasmette senza sosta e il drain non finirebbe mai. */
 static void drain_link(void) {
-    u16 n = 0, i;
+    u16 n = 0, guard;
     u8 pass;
     for (pass = 0; pass < 2; pass++) {
-        for (i = 0; i < 40000u; i++) drain_sink = PEEK(0x01);
-        for (;;) {
+        u32 deadline = (u32)clock() + DRAIN_GAP_JFY;
+        guard = 0;
+        while ((u32)clock() < deadline && ++guard < DRAIN_GUARD) {
             int b = comm_rx_poll();
-            if (b < 0) break;
+            if (b < 0) continue;
             n++;
             scr_unum(8, MSG_ROW, n, COLOR_YELLOW);
             if (n > 200) { put_msg("FLOOD", COLOR_LIGHTRED); return; }
