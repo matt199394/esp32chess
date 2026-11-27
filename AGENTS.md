@@ -31,6 +31,9 @@ c64esp32cart), il **C64 fa solo da UI** (scacchiera, tastiera, testo, suoni).
 # C64 UI -> chessui.prg
 cd c64 && make
 
+# regressione del timeout di comm_rx_byte (VICE headless, bordo verde = ok)
+cd c64 && make test-timeout
+
 # ESP32 motore (seriale)
 arduino-cli compile --fqbn esp32:esp32:mhetesp32minikit esp32
 arduino-cli upload  -p /dev/ttyACM0 --fqbn esp32:esp32:mhetesp32minikit esp32
@@ -59,8 +62,10 @@ c64/
   comm.s/comm.h    byte a byte $DE00/$DF00 + NMI ($0318, ring buffer 16B)
   protocol.h       costanti protocollo
   Makefile         cl65 -> chessui.prg
+  test_timeout.c   regressione timeout comm_rx_byte (VICE)
 docs/PROTOCOL.md   contratto del protocollo + trasporto fisico
 tools/uart_test.py prova motore su seriale
+tools/vice_test_timeout.py  esegue test_timeout.prg in x64sc, controlla il bordo
 ```
 
 ## Decisioni prese in questa sessione (da non ribaltare senza motivo)
@@ -104,6 +109,13 @@ tools/uart_test.py prova motore su seriale
    flottante → `/RESET` basso via 74LS14) e non si avvia. Il bus dati D0-D7
    NON c'entra: è isolato dal 74LS244 (abilitato solo su lettura `$DF00`,
    net `IO2` → `U3-1`/`U3-19`). Vedi schema `c64esp32cart/c64esp32crt1.1_kicad7`.
+7. **Il jiffy clock del C64 è BIG-ENDIAN**: il byte che cambia 60 volte al
+   secondo è `$A2` (`UDTIM` a `$F69B`: `inc $a2` → carry su `$A1` → `$A0`);
+   `$A1` cambia ogni 4,27 s, `$A0` ogni 18,2 min. Ogni timeout implementato
+   "a mano" (es. `comm_rx_byte`) deve leggere **`$A2`**: con `$A1`/`$A0` il
+   timeout diventa 256×/65536× più lungo, cioè un freeze silenzioso. Questo
+   errore è già costato un bug lungo (vedi "Sessione 10" in `docs/BUGS.md`).
+   Regressione: `make test-timeout` in `c64/` (VICE headless).
 
 ## Prossimi passi (ordine suggerito)
 
