@@ -538,7 +538,7 @@ static void draw_board(void)
 
     scr_clear();
     scr_puts(0, 0, "ESP32CHESS", COLOR_WHITE);
-    scr_puts(11, 0, "V9", COLOR_WHITE);   /* marcatore build: se non appare,
+    scr_puts(11, 0, "V10", COLOR_WHITE);  /* marcatore build: se non appare,
                                               sulla C64 gira un .prg vecchio */
 
     for (f = 0; f < 8; f++)
@@ -1000,20 +1000,56 @@ static void link_error(void) {
     scr_blank(0, OVER_KEY_ROW, PANEL_W, COLOR_BLACK);
 }
 
-/* Consuma i byte residui finche' non arriva silenzio per un breve timeout:
- * dopo un errore l'ESP32 puo' avere una raffica ancora in volo.
- * Con contatore a schermo (x=8, MSG_ROW) e limite FLOOD: se arrivano piu'
- * di 200 byte di fila l'ESP32 sta trasmettendo senza sosta e il drain
- * non finirebbe mai. */
+static volatile u8 drain_sink;
+
+/* Consuma i byte gia' arrivati + una coda in volo, SENZA dipendere dal
+ * jiffy clock (due passate di poll separate da un ritardo a loop contato).
+ * Contatore a schermo (x=8, MSG_ROW) e limite FLOOD: se arrivano piu' di
+ * 200 byte l'ESP32 trasmette senza sosta e il drain non finirebbe mai. */
 static void drain_link(void) {
-    u16 n = 0;
-    for (;;) {
-        int b = comm_rx_byte(100);
-        if (b < 0) break;
-        n++;
-        scr_unum(8, MSG_ROW, n, COLOR_YELLOW);
-        if (n > 200) { put_msg("FLOOD", COLOR_LIGHTRED); break; }
+    u16 n = 0, i;
+    u8 pass;
+    for (pass = 0; pass < 2; pass++) {
+        for (i = 0; i < 40000u; i++) drain_sink = PEEK(0x01);
+        for (;;) {
+            int b = comm_rx_poll();
+            if (b < 0) break;
+            n++;
+            scr_unum(8, MSG_ROW, n, COLOR_YELLOW);
+            if (n > 200) { put_msg("FLOOD", COLOR_LIGHTRED); return; }
+        }
     }
+}
+
+/* Misura il jiffy clock: K = $A0 ticchetta, Z = congelato (IRQ KERNAL
+ * morto). Loop a decadenza indipendente dal clock (~0,6 s). */
+static u8 clock_probe(u8 x) {
+    u8 a0 = PEEK(0xA0);
+    u16 i;
+    for (i = 0; i < 6000u; i++)
+        if (PEEK(0xA0) != a0) break;
+    scr_put(x, MSG_ROW, to_screen(i < 6000u ? 'K' : 'Z'), COLOR_WHITE);
+    return (u8)(i < 6000u);
+}
+
+/* Se il clock e' morto, mostra i registri CIA su OVER_ROW per capire il
+ * perche': ICR/CRA di CIA1 (IRQ jiffy) e CIA2 (NMI). Attenzione: leggere
+ * $DC0D/$DD0D acknota gli interrupt pendenti. */
+static void dump_cia(void) {
+    static const char hx[] = "0123456789ABCDEF";
+    char b[13];
+    u8 i = 0, v;
+    u16 regs[4];
+    regs[0] = 0xDC0D; regs[1] = 0xDC0E; regs[2] = 0xDD0D; regs[3] = 0xDD0E;
+    b[i++] = 'C'; b[i++] = ' ';
+    for (v = 0; v < 4; v++) {
+        u8 r = PEEK(regs[v]);
+        b[i++] = hx[r >> 4];
+        b[i++] = hx[r & 15];
+        if (v < 3) b[i++] = ' ';
+    }
+    b[i] = 0;
+    scr_puts(0, OVER_ROW, b, COLOR_YELLOW);
 }
 
 /* Ritorna 1 se e' arrivato l'ACK, 0 su timeout/errore. La consegna dei
@@ -1194,20 +1230,10 @@ static unsigned char start_new_game(void) {
     /* tracer: lettere A-H su MSG_ROW per localizzare un eventuale freeze;
      * la lettera piu' avanzata visibile = ultimo punto raggiunto */
     scr_puts(0, MSG_ROW, "A", COLOR_WHITE);   /* prima di drain_link */
-    /* test jiffy clock: K = $A0 ticchetta, Z = congelato (IRQ morto).
-     * Loop a decadenza indipendente dal clock (~0,5 s). */
-    {
-        u8 a0 = PEEK(0xA0);
-        u16 i;
-        for (i = 0; i < 30000u; i++)
-            if (PEEK(0xA0) != a0) break;
-        if (i < 30000u) {
-            scr_puts(7, MSG_ROW, "K", COLOR_WHITE);
-        } else {
-            scr_puts(7, MSG_ROW, "Z", COLOR_WHITE);
-            put_msg("NOCLK", COLOR_LIGHTRED);
-            return 2;
-        }
+    if (!clock_probe(7)) {                    /* Z = jiffy clock congelato */
+        put_msg("NOCLK", COLOR_LIGHTRED);
+        dump_cia();
+        return 2;
     }
     drain_link();
     scr_puts(1, MSG_ROW, "B", COLOR_WHITE);   /* drain finito */
@@ -1456,11 +1482,13 @@ int main(void)
 
     POKE(0xD020, COLOR_BLACK);               /* bordo */
     POKE(0xD021, COLOR_BLACK);               /* sfondo */
+    POKE(0xDD00, (u8)((PEEK(0xDD00) & 0xFC) | 0x01));  /* banca VIC 2 */
+    POKE(0xD018, 0x13);                      /* schermo $8400, charset $8800 */
+    clock_probe(10);                         /* P1: appena RUNtato */
 
     comm_install();                          /* handler NMI al piu' presto */
     install_charset();
-    POKE(0xDD00, (u8)((PEEK(0xDD00) & 0xFC) | 0x01));  /* banca VIC 2 */
-    POKE(0xD018, 0x13);                      /* schermo $8400, charset $8800 */
+    clock_probe(11);                         /* P2: dopo setup */
 
     new_board_local();
     humanColor = WHITE;
@@ -1482,6 +1510,7 @@ int main(void)
         level = ask_level();
         humanColor = ask_color();
         flip = (humanColor == BLACK) ? 1 : 0;
+        clock_probe(12);                     /* P3: dopo il menu */
 
         draw_board();
 
@@ -1493,6 +1522,7 @@ int main(void)
         }
         (void)wait_ack();
         (void)wait_ack();
+        clock_probe(13);                     /* P4: dopo SET_COLOR/SET_LEVEL */
 
         rc = start_new_game();
         if (rc == 2) return 1;

@@ -494,3 +494,20 @@ byte senza sosta (il drain non finisce mai). La V9 distingue i due casi:
   (~0,5 s) su `$A0`; **K** = ticchetta, **Z** = congelato (NOCLK, esce);
 - `drain_link` mostra il numero di byte scaricati (x=8, MSG_ROW) e smette a
   200 con messaggio **FLOOD** (ESP32 trasmette senza sosta).
+
+### Esito tracer (V9): NOCLK Z — jiffy clock davvero congelato
+
+Il test K/Z e' verificato nell'assembly generato (la lettura di `$A0` NON
+viene hoistata fuori dal loop, non e' un falso positivo): il jiffy clock
+si congela tra il menu (dove cgetc, che dipende dall'IRQ KERNAL, funzionava)
+e l'avvio partita, mentre il codice C continua a girare. Cause software
+escluse nel codice C64: nessuna scrittura a CIA/vettori IRQ, ZP cc65
+`$02-$1B`, stack C `$C000-$CFFF`, niente che tocchi `$DC0D/$DC0E/$DD0E`.
+
+La V10: (1) probe P1-P5 che misurano il clock in 5 punti (a RUN, dopo setup,
+dopo menu, dopo SET_COLOR/SET_LEVEL, a inizio partita) per individuare il
+passo esatto in cui l'IRQ muore; (2) dump dei registri CIA (`$DC0D $DC0E
+$DD0D $DD0E` su OVER_ROW) quando il clock risulta morto, per capire il
+perche' (timer fermo? IRQ mascherato? FLAG pendente?); (3) `drain_link`
+indipendente dal clock (poll + guardia FLOOD + ritardo a loop contato),
+cosi' il freeze attuale non si verifica piu' anche prima di trovare la causa.
