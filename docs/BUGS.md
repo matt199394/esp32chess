@@ -511,3 +511,17 @@ $DD0D $DD0E` su OVER_ROW) quando il clock risulta morto, per capire il
 perche' (timer fermo? IRQ mascherato? FLAG pendente?); (3) `drain_link`
 indipendente dal clock (poll + guardia FLOOD + ritardo a loop contato),
 cosi' il freeze attuale non si verifica piu' anche prima di trovare la causa.
+
+### Dump CIA (V10): timer A CIA1 ATTIVO ($DC0E=$01) ma $DC0D=$00
+
+`$DC0E=$01` (timer A avviato, continuo) con `$DC0D=$00` (niente di latched
+alla lettura) e clock fermo: il timer硬件 gira ma l'IRQ non viene piu'
+servito. Combinazione coerente con **mask CIA1 disabilitato** (scrittura su
+`$DC0D`) oppure **vettore IRQ `$0314` alterato** — non con un guasto timer.
+
+La V11: (1) dump esteso su tre righe: A = `$DC0D $DC0E $DC04 $DC05`,
+B = `$DD0D $DD0E $0314 $0315` (stock IRQ vector = `31 EA`), D = `$0318
+$0319 $01`; (2) auto-riparo: al rilevamento di clock morto, `RESTOR`
+($FF87) + `IOINIT` ($FF84), reinstallazione banco VIC + `$D018` + handler
+NMI (`comm_install`), nuovo probe; se torna K il gioco prosegue (marcatore
+H = healed).

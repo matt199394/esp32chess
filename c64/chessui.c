@@ -538,7 +538,7 @@ static void draw_board(void)
 
     scr_clear();
     scr_puts(0, 0, "ESP32CHESS", COLOR_WHITE);
-    scr_puts(11, 0, "V10", COLOR_WHITE);  /* marcatore build: se non appare,
+    scr_puts(11, 0, "V11", COLOR_WHITE);  /* marcatore build: se non appare,
                                               sulla C64 gira un .prg vecchio */
 
     for (f = 0; f < 8; f++)
@@ -1032,24 +1032,46 @@ static u8 clock_probe(u8 x) {
     return (u8)(i < 6000u);
 }
 
-/* Se il clock e' morto, mostra i registri CIA su OVER_ROW per capire il
- * perche': ICR/CRA di CIA1 (IRQ jiffy) e CIA2 (NMI). Attenzione: leggere
- * $DC0D/$DD0D acknota gli interrupt pendenti. */
-static void dump_cia(void) {
+/* Riga di esadecimali a schermo, per la diagnostica */
+static void dump_line(u8 y, char tag, const u16 *regs, u8 n) {
     static const char hx[] = "0123456789ABCDEF";
-    char b[13];
-    u8 i = 0, v;
-    u16 regs[4];
-    regs[0] = 0xDC0D; regs[1] = 0xDC0E; regs[2] = 0xDD0D; regs[3] = 0xDD0E;
-    b[i++] = 'C'; b[i++] = ' ';
-    for (v = 0; v < 4; v++) {
-        u8 r = PEEK(regs[v]);
+    char b[16];
+    u8 i = 2, k, r;
+    b[0] = tag;
+    b[1] = ':';
+    for (k = 0; k < n; k++) {
+        r = PEEK(regs[k]);
         b[i++] = hx[r >> 4];
         b[i++] = hx[r & 15];
-        if (v < 3) b[i++] = ' ';
+        if (k < n - 1) b[i++] = ' ';
     }
     b[i] = 0;
-    scr_puts(0, OVER_ROW, b, COLOR_YELLOW);
+    scr_puts(0, y, b, COLOR_YELLOW);
+}
+
+/* Se il clock e' morto, mostra i registri chiave per capire il perche':
+ * A: $DC0D (latch IRQ CIA1), $DC0E (controllo timer A CIA1), $DC04/$DC05
+ *    (preload timer A: se cambiati, il tick non e' piu' a 60 Hz)
+ * B: $DD0D (latch NMI CIA2), $DD0E, $0314/$0315 (vettore IRQ: stock 31 EA)
+ * D: $0318/$0319 (vettore NMI = nostro handler), $01 (config memoria)
+ * Attenzione: leggere $DC0D/$DD0D acknota gli interrupt pendenti. */
+static void dump_cia(void) {
+    u16 r1[4], r2[4], r3[3];
+    r1[0] = 0xDC0D; r1[1] = 0xDC0E; r1[2] = 0xDC04; r1[3] = 0xDC05;
+    r2[0] = 0xDD0D; r2[1] = 0xDD0E; r2[2] = 0x0314; r2[3] = 0x0315;
+    r3[0] = 0x0318; r3[1] = 0x0319; r3[2] = 0x0001;
+    dump_line(OVER_ROW,     'A', r1, 4);
+    dump_line(OVER_ROW + 1, 'B', r2, 4);
+    dump_line(OVER_ROW + 2, 'D', r3, 3);
+}
+
+/* Riporta il jiffy clock in vita: RESTOR ($FF87) ripristina i vettori
+ * KERNAL (incluso $0314 -> $EA31), IOINIT ($FF84) reinizializza le CIA
+ * (timer A a 60 Hz + mask IRQ). Poi banco VIC e handler NMI vanno
+ * reinstallati a mano (IOINIT tocca $DD00, RESTOR ripristina $0318). */
+static void kernal_reinit(void) {
+    __asm__("jsr $ff87");
+    __asm__("jsr $ff84");
 }
 
 /* Ritorna 1 se e' arrivato l'ACK, 0 su timeout/errore. La consegna dei
@@ -1231,9 +1253,17 @@ static unsigned char start_new_game(void) {
      * la lettera piu' avanzata visibile = ultimo punto raggiunto */
     scr_puts(0, MSG_ROW, "A", COLOR_WHITE);   /* prima di drain_link */
     if (!clock_probe(7)) {                    /* Z = jiffy clock congelato */
-        put_msg("NOCLK", COLOR_LIGHTRED);
-        dump_cia();
-        return 2;
+        put_msg("HEAL", COLOR_YELLOW);
+        dump_cia();                           /* stato PRIMA del reinit */
+        kernal_reinit();
+        POKE(0xDD00, (u8)((PEEK(0xDD00) & 0xFC) | 0x01));
+        POKE(0xD018, 0x13);
+        comm_install();
+        if (!clock_probe(14)) {               /* Z anche dopo il reinit */
+            put_msg("NOCLK", COLOR_LIGHTRED);
+            return 2;
+        }
+        scr_puts(9, MSG_ROW, "H", COLOR_WHITE);   /* guarito */
     }
     drain_link();
     scr_puts(1, MSG_ROW, "B", COLOR_WHITE);   /* drain finito */
