@@ -826,3 +826,51 @@ perché il lato ESP32 non aveva nessun tentativo successivo.
 - `g++ -fsyntax-only -std=gnu++11 -DUSE_C64_BUS` su `esp32.ino`: OK.
 - Su hardware: flashare l'ESP32 (nuovi comandi FAME) e ricaricare il
   .prg V16; testare replay, SAN e undo.
+
+## Sessione 16 — Menu a tre voci, etichette dei finali e finali giocabili (V17)
+
+### Richiesta
+
+Menu principale con tre voci: **PARTITE FAMOSE** (sottomenu con i cognomi dei
+giocatori + anno), **GIOCA A SCACCHI** (livello + colore) e **FINALI** (elenco
+di finali che l'umano può vincere in un numero minimo di mosse).
+
+### Cosa è stato fatto
+
+- **Menu principale**: `main()` ora presenta `1 PARTITE FAMOSE`,
+  `2 GIOCA A SCACCHI`, `3 FINALI` (tasti 1/2/3); livello e colore vengono
+  chiesti solo nella voce 2.
+- **Etichette partite famose**: riportate a `COGNOME-COGNOME ANNO`
+  (es. `ANDERSSEN-KIESERITZKY 1851`); il numero di tasto lo aggiunge
+  `ask_fame`, quindi le stringhe non lo contengono più. Corretto anche il
+  buffer `label[24]` → `label[40]`: con l'etichetta
+  `POLUGAEVSKY-NEZHMETDINOV 1958` l'assegnazione sforava il buffer.
+- **Finali**: nuovo comando `END_LOAD` (`0x53` 'S') + indice. Le 7 posizioni
+  (`tools/endgames.txt`) sono validate dal motore vero da
+  `tools/endgames2h.c`, che genera `esp32/endgames.h` (board/side/castle/
+  ep/winner/target) e `c64/endgames.h` (etichette + board per la UI). Per i
+  "MATTO IN N" la soluzione SAN deve finire con scacco matto e il numero di
+  mosse del vincitore deve corrispondere al N; Lucena è "tecnica" (target 0).
+- **Stato finale su entrambi i lati** (`endActive`): `load_endgame(idx)`
+  sull'ESP32 e `end_load_local(idx)` sul C64 ricostruiscono la posizione
+  dall'archivio, così UNDO e resync in un finale non ripartono dalla
+  posizione di partenza. `NEW_GAME`/`QUIT`/`FAME_LOAD` lo azzerano.
+- `start_endgame(idx)` imposta `humanColor = endWinner[idx]` (l'umano gioca
+  il lato che vince), carica il finale e, se il difensore è al tratto
+  (es. "RE E TORRE MUOVE NERO"), manda `GO`.
+- Helper SAN dei generatori spostati in `tools/san_tool.h` (condivisi da
+  `pgn2moves.c` e `endgames2h.c`); `pgn2moves` ora salta le righe di
+  commento `#` nell'input.
+- Marcatore di build: **V17**.
+
+### Verifica
+
+- `tools/endgames2h.c`: 7/7 finali validati (posizione legale, soluzioni
+  legali, mate alla fine delle linee "MATTO IN N", numero mosse = target).
+  Nota: la rete di matto cavallo+alfiere corretta (alfiere su a7: con
+  alfiere su e5 il cavallo su c7 bloccava la diagonale su b8 e il re
+  scappava).
+- `tools/pgn2moves.c`: 30 partite, 2143 semimosse, 0 errori (header
+  rigenerato identico).
+- Build cc65 senza nuovi warning; BSS fino a $703A, sotto $8400.
+- `g++ -fsyntax-only -std=gnu++11 -DUSE_C64_BUS` su `esp32.ino`: OK.

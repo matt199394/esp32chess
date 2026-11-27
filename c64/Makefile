@@ -9,7 +9,7 @@ CFLAGS = -t c64 -Oirs -m chessui.map -Wl -D,__STACKSIZE__=0x1000
 
 all: chessui.prg
 
-chessui.prg: chessui.c comm.s comm.h protocol.h font_writer.h
+chessui.prg: chessui.c comm.s comm.h protocol.h font_writer.h endgames.h
 	$(CC65) $(CFLAGS) -o chessui.prg chessui.c comm.s
 
 # Regressione del timeout: misura il jiffy clock in VICE (bordo verde = ok).

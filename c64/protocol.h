@@ -19,6 +19,10 @@
                              * partita famosa: RSP_MOVED + flags + m lo + m hi,
                              * oppure RSP_GAME_OVER a lista esaurita (reason 0:
                              * risultato storico, non un matto) */
+#define CMD_END_LOAD  0x53   /* 'S' + 1 byte: indice finale (0..END_COUNT-1);
+                             * risponde ACK e carica la posizione (l'umano
+                             * gioca il lato che vince); se dopo il carico
+                             * tocca al motore la UI manda CMD_GO */
 
 /* ---- risposte ESP32 -> C64 ---- */
 #define RSP_ILLEGAL   0x00

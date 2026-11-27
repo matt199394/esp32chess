@@ -15,6 +15,7 @@
 extern "C" {
 #include "chess.h"
 #include "famous_games.h"
+#include "endgames.h"
 }
 
 #include "protocol.h"
@@ -294,6 +295,7 @@ static void sendBestMove(void) {
 static void handleNewGame(void) {
   new_game();
   gameHistN = 0;
+  endActive = 0xFF;
   linkWriteByte(RSP_ACK);
   if (humanColor == BLACK) sendBestMove();   /* il computer (bianco) apre */
 }
@@ -350,13 +352,62 @@ static void handleMove(void) {
   DBG("MOVE: risposta inviata\n");
 }
 
+/* ---- finali: posizioni iniziali dall'archivio in flash ---- */
+
+/* Indice del finale in corso (0xFF = partita normale). Serve a UNDO e al
+ * resync: ricominciare dal nuovo_game() butterebbe la posizione del
+ * finale; ricaricando endActive le due parti restano allineate. */
+static uint8_t endActive = 0xFF;
+
+/* Carica la posizione del finale idx (stessa procedura della generazione:
+ * new_game come base, poi sovrascrive board/side/castle/ep e ricalcola
+ * re, valutazione, chiave e storico). */
+static void load_endgame(uint8_t idx) {
+  u8 i, sq;
+
+  new_game();
+  for (i = 0; i < 128; i++) board[i] = 0;
+  for (i = 0; i < 64; i++) {
+    u8 p = endBoard[idx][i];
+    if (p) board[(u8)(((7 - (i >> 3)) << 4) | (i & 7))] = p;
+  }
+  side = endSide[idx];
+  castle = endCastle[idx];
+  epSq = (endEp[idx] == 0xFF) ? (s8)-1 : (s8)endEp[idx];
+  halfmove = 0;
+  for (sq = 0; sq < 128; sq++) {
+    if (sq & 0x88) continue;
+    if (PT(board[sq]) == KING) kingSq[PC(board[sq])] = sq;
+  }
+  refresh_eval();
+  compute_key();
+  reset_history();
+  gameHistN = 0;
+  humanColor = endWinner[idx];   /* l'umano gioca il lato che vince */
+  endActive = idx;
+}
+
+static void handleEndLoad(void) {
+  int idx = linkReadByte(2000);
+  if (idx < 0 || (u8)idx >= END_COUNT) {
+    linkWriteByte(RSP_ILLEGAL);
+    return;
+  }
+  load_endgame((uint8_t)idx);
+  linkWriteByte(RSP_ACK);
+}
+
 /* UNDO: ricostruisce la partita dall'inizio riapplicando tutte le mosse
- * tranne le ultime due. Semplice e corretto (niente undo incrementale). */
+ * tranne le ultime due. Semplice e corretto (niente undo incrementale).
+ * In un finale si riparte dalla posizione del finale, non dal nuovo_game. */
 static void handleUndo(void) {
   if (gameHistN >= 2) {
-    gameHistN -= 2;
-    new_game();
-    for (u16 i = 0; i < gameHistN; i++) commit_move(gameHist[i]);
+    u16 keep = (u16)(gameHistN - 2);
+    u16 i;
+    if (endActive != 0xFF) load_endgame(endActive);
+    else                   new_game();
+    gameHistN = 0;
+    for (i = 0; i < keep; i++) { commit_move(gameHist[i]); gameHistN++; }
   }
   linkWriteByte(RSP_ACK);
 }
@@ -364,6 +415,7 @@ static void handleUndo(void) {
 static void handleQuit(void) {
   new_game();
   gameHistN = 0;
+  endActive = 0xFF;
   linkWriteByte(RSP_ACK);
 }
 
@@ -390,6 +442,7 @@ static void handleFameLoad(void) {
   }
   famIdx = (u16)idx;
   famPos = 0;
+  endActive = 0xFF;
   new_game();
   gameHistN = 0;
   linkWriteByte(RSP_ACK);
@@ -449,6 +502,7 @@ static void dispatch(uint8_t cmd) {
     case CMD_GO:        handleGo();       break;
     case CMD_FAME_LOAD: handleFameLoad(); break;
     case CMD_FAME_NEXT: handleFameNext(); break;
+    case CMD_END_LOAD:  handleEndLoad();  break;
     default: break;                       /* comando ignoto: ignora */
   }
 }

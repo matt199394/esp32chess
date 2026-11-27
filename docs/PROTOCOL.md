@@ -62,6 +62,7 @@ Tutti i comandi sono **1 byte + eventuali parametri**; tutte le risposte sono
 | `GO`        | `0x45` 'E' | — | muovi se è il turno del computer, altrimenti `ACK` |
 | `FAME_LOAD` | `0x46` 'F' | 1 byte: indice partita famosa (0..29) | prepara il replay: `ACK` + n lo + n hi (n = semimosse della partita) |
 | `FAME_NEXT` | `0x50` 'P' | — | applica la prossima semimossa della partita famosa: `MOVED` + flags + mossa lo + mossa hi, oppure `GAME_OVER` a lista esaurita |
+| `END_LOAD`  | `0x53` 'S' | 1 byte: indice finale (0..6) | carica la posizione del finale: `ACK`. L'umano gioca il lato che vince (impostato dall'ESP32); se dopo il carico tocca al motore (difensore) la UI manda `GO` |
 
 ### ESP32 → C64
 
@@ -118,6 +119,22 @@ generate e validate da `tools/pgn2moves.c`, una per volta:
    così il C64 disegna solo le case toccate e calcola la SAN locale;
 3. dopo l'ultima semimossa un ulteriore `FAME_NEXT` chiude con
    `GAME_OVER` reason 0 e il risultato storico.
+
+## Finali
+
+Le posizioni dei finali sono in flash su entrambi i lati (`esp32/endgames.h`
+e `c64/endgames.h`, generate e validate da `tools/endgames2h.c` da
+`tools/endgames.txt`):
+
+1. il C64 manda `END_LOAD` + indice: l'ESP32 carica la posizione (board,
+   lato di tratto, chiave zobrist, storico azzerato) e risponde `ACK`;
+2. se il difensore (motore) è al tratto, il C64 manda `GO` e consuma la
+   `BEST_MOVE`;
+3. da qui la partita segue il flusso normale (`MOVE`/`UNDO`/resync).
+
+`UNDO` in un finale riparte dalla posizione del finale (non da quella di
+partenza): l'indice del finale attivo vive su entrambi i lati e viene
+azzerato da `NEW_GAME`, `QUIT` e `FAME_LOAD`.
 
 ## Flusso di una partita
 

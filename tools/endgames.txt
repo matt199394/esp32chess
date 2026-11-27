@@ -1,0 +1,45 @@
+# finali - sorgente per tools/endgames2h.c
+# formato per blocco (riga vuota tra i blocchi):
+#   nome (per il menu C64, solo lettere/cifre/spazi)
+#   FEN
+#   TARGET + vincitore: N w|b  (N = mosse del vincitore, 0 = tecnica)
+#   soluzione SAN ('-' = nessuna: solo posizione, il giocatore la trova lui)
+#
+# Le posizioni e le soluzioni sono validate dal motore vero:
+# per TARGET > 0 la linea deve terminare con SCACCO MATTO e il numero
+# di mosse del vincitore deve corrispondere al TARGET.
+
+RE E DONNA MATTO IN 1
+7k/8/5KQ1/8/8/8/8/8 w - - 0 1
+1 w
+Qg7#
+
+RE E DONNA MATTO IN 2
+7k/8/5K2/8/8/8/8/Q7 w - - 0 1
+2 w
+Kg6 Kg8 Qa8#
+
+RE E TORRE MATTO IN 1
+3k4/8/3K4/8/8/8/8/R7 w - - 0 1
+1 w
+Ra8#
+
+RE E TORRE MUOVE NERO
+6k1/8/5K1R/8/8/8/8/8 b - - 0 1
+1 w
+Kf8 Rh8#
+
+DUE TORRI MATTO IN 2
+6k1/8/8/8/8/8/R7/1R4K1 w - - 0 1
+2 w
+Ra7 Kf8 Rb8#
+
+CAVALLO E ALFIERE MATTO 1
+k7/B7/1K6/3N4/8/8/8/8 w - - 0 1
+1 w
+Nc7#
+
+LUCENA VITTORIA TECNICA
+4K3/2k1P3/8/8/8/8/5r2/6R1 w - - 0 1
+0 w
+-

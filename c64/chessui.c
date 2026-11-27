@@ -5,7 +5,8 @@
  * joystick e due timer (giocatore e AI). La mossa del giocatore viene
  * mostrata subito sulla scacchiera, prima ancora che l'ESP32 risponda.
  * Cronologia in notazione algebrica internazionale (SAN, calcolata sul
- * C64), undo con 'u' e replay delle partite famose archiviate sull'ESP32.
+ * C64), undo con 'u', replay delle partite famose archiviate sull'ESP32
+ * e finali giocabili (menu principale a tre voci).
  *
  * Il C64 NON genera mosse ne' valuta: mantiene solo una copia della
  * posizione per il display (lboard); la legalita' la decide sempre l'ESP32.
@@ -24,6 +25,7 @@
 #include "protocol.h"
 #include "comm.h"
 #include "font_writer.h"
+#include "endgames.h"
 
 /* ---- tipi (cc65: int = 16 bit) ---- */
 typedef unsigned char  u8;
@@ -104,40 +106,46 @@ static u8 histSan[400][8];          /* SAN di ogni semimossa (per show_history) 
 static u8 pendSan[8];               /* SAN della mossa in attesa di conferma */
 
 /* partite famose: mantieni allineato con FAME_COUNT in esp32/famous_games.h
- * (le etichette sono solo per il menu C64; le mosse stanno sull'ESP32) */
+ * (le etichette sono solo per il menu C64; le mosse stanno sull'ESP32;
+ * il numero di tasto lo aggiunge ask_fame) */
 #define FAME_N 30
 static const char * const fameLabel[FAME_N] = {
-    "1 IMMORTAL 1851",
-    "2 EVERGREEN 1852",
-    "3 OPERA 1858",
-    "4 STEINITZ-BARDELEBEN 1895",
-    "5 LASKER-BAUER 1889",
-    "6 ROTLEWI-RUBINSTEIN 1907",
-    "7 MARSHALL-LEVITSKY 1912",
-    "8 LASKER-CAPABLANCA 1914",
-    "9 ALEKHINE-NIMZOWITSCH 1930",
-    "10 BYRNE-FISCHER 1956",
-    "11 SPASSKY-BRONSTEIN 1960",
-    "12 TAL-LARSEN 1965",
-    "13 FISCHER-SPASSKY 1972 G6",
-    "14 KARPOV-KASPAROV 1985 G16",
-    "15 KARPOV-KASPAROV 1985 G24",
-    "16 KASPAROV-ANAND 1995 G10",
-    "17 IVANCHUK-YUSUPOV 1991",
-    "18 SHORT-TIMMAN 1991",
-    "19 BELIAVSKY-NUNN 1985",
-    "20 POLUGAEVSKY-NEZHMETDINOV 1958",
-    "21 KASPAROV-TOPALOV 1999",
-    "22 DEEP BLUE-KASPAROV 1997 G6",
-    "23 KARPOV-KASPAROV 1985 G22",
-    "24 KASPAROV-KRAMNIK 2000 G2",
-    "25 ARONIAN-ANAND 2013",
-    "26 CARLSEN-KARJAKIN 2016 G10",
-    "27 CARLSEN-CARUANA 2018 TB1",
-    "28 DING-NEPOMNIACHTCHI 2023 G6",
-    "29 CARLSEN-ANAND 2013 G5",
-    "30 KASPAROV-TOPALOV 1999",
+    "ANDERSSEN-KIESERITZKY 1851",
+    "ANDERSSEN-DUFRESNE 1852",
+    "MORPHY-BRUNSWICK 1858",
+    "STEINITZ-BARDELEBEN 1895",
+    "LASKER-BAUER 1889",
+    "ROTLEWI-RUBINSTEIN 1907",
+    "MARSHALL-LEVITSKY 1912",
+    "LASKER-CAPABLANCA 1914",
+    "ALEKHINE-NIMZOWITSCH 1930",
+    "BYRNE-FISCHER 1956",
+    "SPASSKY-BRONSTEIN 1960",
+    "TAL-LARSEN 1965",
+    "FISCHER-SPASSKY 1972 G6",
+    "KARPOV-KASPAROV 1985 G16",
+    "KASPAROV-KARPOV 1985 G24",
+    "KASPAROV-ANAND 1995 G10",
+    "IVANCHUK-YUSUPOV 1991",
+    "SHORT-TIMMAN 1991",
+    "BELIAVSKY-NUNN 1985",
+    "POLUGAEVSKY-NEZHMETDINOV 1958",
+    "KASPAROV-TOPALOV 1999",
+    "DEEP BLUE-KASPAROV 1997 G6",
+    "KARPOV-KASPAROV 1985 G22",
+    "KASPAROV-KRAMNIK 2000 G2",
+    "ARONIAN-ANAND 2013",
+    "CARLSEN-KARJAKIN 2016 G10",
+    "CARLSEN-CARUANA 2018 TB1",
+    "DING-NEPOMNIACHTCHI 2023 G6",
+    "CARLSEN-ANAND 2013 G5",
+    "KASPAROV-TOPALOV 1999 II",
 };
+
+/* finali in corso: indice (0xFF = partita normale). Serve a undo e resync:
+ * la board locale va ricostruita dalla posizione del finale, non da quella
+ * di partenza. Allineato con endActive sull'ESP32. */
+static u8 endActive = 0xFF;
 
 static u8 humanColor;
 static u8 level;
@@ -530,6 +538,20 @@ static void new_board_local(void) {
     lep = -1;
 }
 
+/* board locale dalla posizione iniziale del finale idx (dati generati,
+ * a8..h1): la struttura e' la stessa di new_board_local */
+static void end_load_local(u8 idx) {
+    u8 i;
+
+    memset(lboard, 0, sizeof(lboard));
+    for (i = 0; i < 64; i++) {
+        u8 p = endBoard[idx][i];
+        if (p) lboard[(u8)(((7 - (i >> 3)) << 4) | (i & 7))] = p;
+    }
+    lside = endSide[idx];
+    lep = -1;
+}
+
 /* Applica una mossa alla copia locale (solo per il display: gestisce cattura,
  * promozione, arrocco ed en passant ma non verifica la legalita'). */
 static void apply_move_local(u16 m) {
@@ -638,7 +660,7 @@ static void draw_board(void)
 
     scr_clear();
     scr_puts(0, 0, "ESP32CHESS", COLOR_WHITE);
-    scr_puts(11, 0, "V16", COLOR_WHITE);  /* marcatore build: se non appare,
+    scr_puts(11, 0, "V17", COLOR_WHITE);  /* marcatore build: se non appare,
                                             sulla C64 gira un .prg vecchio */
 
     for (f = 0; f < 8; f++)
@@ -1459,7 +1481,8 @@ static unsigned char resync_board(void) {
     if (n > 400) { link_error(); return 0; }
 
     histN = 0;
-    new_board_local();
+    if (endActive != 0xFF) end_load_local(endActive);
+    else                   new_board_local();
     for (i = 0; i < n; i++) {
         b = comm_rx_byte(RX_TIMEOUT_BYTE); if (b < 0) { link_error(); return 0; }
         m = (u16)b;
@@ -1519,7 +1542,8 @@ static unsigned char do_undo(void) {
     (void)wait_ack();
 
     histN -= 2;
-    new_board_local();
+    if (endActive != 0xFF) end_load_local(endActive);
+    else                   new_board_local();
     for (i = 0; i < histN; i++) apply_move_local(hist[i]);
     if (histN) {
         h1 = M_FROM(hist[histN - 1]);
@@ -1550,7 +1574,7 @@ static u8 ask_fame(void)
 
     for (;;) {
         u8 i, first = (u8)(page * 10), cnt = 10;
-        char label[24];
+        char label[40];                 /* le etichette lunghe (fino a 32+3) */
         u8 pos;
 
         scr_clear();
@@ -1654,6 +1678,78 @@ static u8 replay_loop(u8 idx)
         return 1;                           /* torna al menu principale */
     }
     return 1;
+}
+
+/* ================================================================== */
+/* finali: posizioni archiviate, l'umano gioca il lato che vince       */
+/* ================================================================== */
+
+/* Sottomenu finali: 1..7 selezionano, '.' o RUN-STOP indietro.
+ * Ritorna 0..END_COUNT-1 o 0xFF se l'utente ripensa. */
+static u8 ask_endgames(void)
+{
+    u8 sel = 0xFF;
+    int c;
+
+    for (;;) {
+        u8 i;
+        char label[40];
+        u8 pos;
+
+        scr_clear();
+        scr_puts(0, 0, "FINALI", COLOR_WHITE);
+        scr_puts(0, 1, "VINCI TU  . =INDIETRO", COLOR_WHITE);
+        for (i = 0; i < END_COUNT; i++) {
+            label[0] = (char)('1' + i);
+            label[1] = ' ';
+            pos = 2;
+            while (endLabel[i][pos - 2]) {
+                label[pos] = endLabel[i][pos - 2];
+                pos++;
+            }
+            label[pos] = 0;
+            scr_puts(0, (u8)(3 + i), label, COLOR_WHITE);
+        }
+
+        c = cgetc();
+        if (c == 3 || c == '.') return 0xFF;
+        if (c >= '1' && (u8)(c - '1') < END_COUNT)
+            sel = (u8)(c - '1');
+        if (sel < END_COUNT) return sel;
+    }
+}
+
+/* Prepara il finale idx: board locale dai dati generati, END_LOAD
+ * sull'ESP32 (che imposta humanColor = lato che vince) e, se tocca al
+ * motore (difensore), GO. Ritorna come start_new_game:
+ * 0 ok, 1 partita finita subito, 2 errore di link. */
+static unsigned char start_endgame(u8 idx)
+{
+    histN = 0;
+    end_load_local(idx);
+    h1 = h2 = 0xFF;
+    hasAiMove = 0;
+    checkFlag = 0;
+    drawNote = 0;
+    joyFrom = 0xFF;
+    joyCursor = 0xFF;
+    plBase = aiBase = 0;
+    segT0 = (u32)clock();
+    segWho = SEG_PLAYER;
+    flip = (humanColor == BLACK) ? 1 : 0;
+    draw_board();
+    show_history();
+
+    drain_link();
+    if (comm_tx_byte(CMD_END_LOAD) != 0 || comm_tx_byte(idx) != 0) {
+        link_error(); return 2;
+    }
+    (void)wait_ack();
+    if (lside != humanColor) {            /* difensore al tratto: muove il motore */
+        if (comm_tx_byte(CMD_GO) != 0) { link_error(); return 2; }
+        return recv_engine_move();
+    }
+    return 0;
 }
 
 /* ================================================================== */
@@ -1822,9 +1918,11 @@ int main(void)
 
     first = 1;
     for (;;) {
-        /* menu principale: a fine partita N ripassa da qui (livello e
-         * colore vengono richiesti ogni volta); al primo giro la schermata
-         * e' gia' pronta (disegnata prima del flip video) */
+        u8 choice;
+
+        /* menu principale a tre voci: a fine partita N ripassa da qui;
+         * al primo giro la schermata e' gia' pronta (disegnata prima del
+         * flip video) */
         if (!first) {
             emptyBoard = 1;
             draw_board();
@@ -1832,20 +1930,50 @@ int main(void)
         }
         first = 0;
 
-        level = ask_level();
-        humanColor = ask_color();
+        scr_puts(0, 3,  "1 PARTITE FAMOSE", COLOR_WHITE);
+        scr_puts(0, 5,  "2 GIOCA A SCACCHI", COLOR_WHITE);
+        scr_puts(0, 7,  "3 FINALI", COLOR_WHITE);
+        scr_puts(0, 9,  "SCELTA:", COLOR_WHITE);
+        do { c = cgetc(); } while (c < '1' || c > '3');
+        scr_put(7, 9, to_screen((char)c), COLOR_WHITE);
+        choice = (u8)(c - '1');
 
-        scr_puts(0, 15, "P FAMOSE  INVIO=GIOCA", COLOR_WHITE);
-        c = cgetc();
-        if (c == 'p' || c == 'P') {
+        if (choice == 0) {                     /* partite famose */
             u8 idx = ask_fame();
+            endActive = 0xFF;
             if (idx != 0xFF) {
                 rc = replay_loop(idx);
                 if (rc == 0) return 0;    /* Q o errore di link */
-                first = 0;                /* fine partita/stop: menu */
+            }
+            continue;                     /* fine partita/stop/ripensa: menu */
+        }
+
+        if (choice == 2) {                     /* finali */
+            u8 idx = ask_endgames();
+            if (idx != 0xFF) {
+                humanColor = endWinner[idx];  /* l'umano gioca il lato che vince */
+                endActive = idx;
+                flip = (humanColor == BLACK) ? 1 : 0;
+                rc = start_endgame(idx);
+                if (rc == 2) return 1;
+                if (rc == 1) {          /* finita subito: scelta nuova/esci
+                                           gia' chiesta */
+                    if (!g_wantNew) return 0;
+                    endActive = 0xFF;
+                    continue;
+                }
+                /* 0 = Q/link morto: esci; 1 = game over + N: menu */
+                if (game_loop() == 0) return 0;
+                endActive = 0xFF;
                 continue;
             }
+            continue;
         }
+
+        /* gioco normale: livello e colore, poi partita */
+        level = ask_level();
+        humanColor = ask_color();
+        endActive = 0xFF;
 
         flip = (humanColor == BLACK) ? 1 : 0;
 
