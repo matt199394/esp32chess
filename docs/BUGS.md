@@ -670,9 +670,10 @@ ridisegno viene saltato (variabile `first`).
 
 ### Obiettivo
 
-Usare la grafica dei pezzi di *The Don's Gambit* (`dongambit.prg` +
-`dongambit.png`, riferimento aggiunto al branch) al posto dei glyph hires
-"solid/outline".
+Usare la grafica dei pezzi di *The Don's Gambit* (`dongambit.png`, unico
+riferimento nel repo) al posto dei glyph hires "solid/outline". Il `.prg`
+originale non e' versionato (resta solo in locale, vedi `.gitignore`): le
+forme sono state estratte dallo screenshot, non dal binario.
 
 ### Analisi
 
