@@ -515,7 +515,7 @@ cosi' il freeze attuale non si verifica piu' anche prima di trovare la causa.
 ### Dump CIA (V10): timer A CIA1 ATTIVO ($DC0E=$01) ma $DC0D=$00
 
 `$DC0E=$01` (timer A avviato, continuo) con `$DC0D=$00` (niente di latched
-alla lettura) e clock fermo: il timer硬件 gira ma l'IRQ non viene piu'
+alla lettura) e clock fermo: il timer hardware gira ma l'IRQ non viene piu'
 servito. Combinazione coerente con **mask CIA1 disabilitato** (scrittura su
 `$DC0D`) oppure **vettore IRQ `$0314` alterato** — non con un guasto timer.
 
