@@ -482,3 +482,15 @@ Letture chiave: solo `A` → freeze dentro `drain_link` (sospettare `$A0`
 congelato); `A`+`B` → dentro tx NEW_GAME (ESP32 non alza D7); fino a `D`/`E`
 senza `F` → impossibile con timeout funzionanti; `F`/`G` visibili ma input
 morto → IRQ morto in game_loop.
+
+### Esito tracer (V8): freeze dentro drain_link (solo "A" a schermo)
+
+Con V8 il freeze lascia **solo la lettera A**: bloccato in `drain_link()`, con
+buffer rx (quasi sicuramente) vuoto e timeout su `$A0` scattante. Due sole
+spiegazioni possibili: jiffy clock/IRQ congelato, oppure l'ESP32 trasmette
+byte senza sosta (il drain non finisce mai). La V9 distingue i due casi:
+
+- test diretto del clock prima del drain: loop a decadenza indipendente
+  (~0,5 s) su `$A0`; **K** = ticchetta, **Z** = congelato (NOCLK, esce);
+- `drain_link` mostra il numero di byte scaricati (x=8, MSG_ROW) e smette a
+  200 con messaggio **FLOOD** (ESP32 trasmette senza sosta).

@@ -538,7 +538,7 @@ static void draw_board(void)
 
     scr_clear();
     scr_puts(0, 0, "ESP32CHESS", COLOR_WHITE);
-    scr_puts(11, 0, "V8", COLOR_WHITE);   /* marcatore build: se non appare,
+    scr_puts(11, 0, "V9", COLOR_WHITE);   /* marcatore build: se non appare,
                                               sulla C64 gira un .prg vecchio */
 
     for (f = 0; f < 8; f++)
@@ -1001,9 +1001,19 @@ static void link_error(void) {
 }
 
 /* Consuma i byte residui finche' non arriva silenzio per un breve timeout:
- * dopo un errore l'ESP32 puo' avere una raffica ancora in volo. */
+ * dopo un errore l'ESP32 puo' avere una raffica ancora in volo.
+ * Con contatore a schermo (x=8, MSG_ROW) e limite FLOOD: se arrivano piu'
+ * di 200 byte di fila l'ESP32 sta trasmettendo senza sosta e il drain
+ * non finirebbe mai. */
 static void drain_link(void) {
-    while (comm_rx_byte(100) >= 0) ;
+    u16 n = 0;
+    for (;;) {
+        int b = comm_rx_byte(100);
+        if (b < 0) break;
+        n++;
+        scr_unum(8, MSG_ROW, n, COLOR_YELLOW);
+        if (n > 200) { put_msg("FLOOD", COLOR_LIGHTRED); break; }
+    }
 }
 
 /* Ritorna 1 se e' arrivato l'ACK, 0 su timeout/errore. La consegna dei
@@ -1184,6 +1194,21 @@ static unsigned char start_new_game(void) {
     /* tracer: lettere A-H su MSG_ROW per localizzare un eventuale freeze;
      * la lettera piu' avanzata visibile = ultimo punto raggiunto */
     scr_puts(0, MSG_ROW, "A", COLOR_WHITE);   /* prima di drain_link */
+    /* test jiffy clock: K = $A0 ticchetta, Z = congelato (IRQ morto).
+     * Loop a decadenza indipendente dal clock (~0,5 s). */
+    {
+        u8 a0 = PEEK(0xA0);
+        u16 i;
+        for (i = 0; i < 30000u; i++)
+            if (PEEK(0xA0) != a0) break;
+        if (i < 30000u) {
+            scr_puts(7, MSG_ROW, "K", COLOR_WHITE);
+        } else {
+            scr_puts(7, MSG_ROW, "Z", COLOR_WHITE);
+            put_msg("NOCLK", COLOR_LIGHTRED);
+            return 2;
+        }
+    }
     drain_link();
     scr_puts(1, MSG_ROW, "B", COLOR_WHITE);   /* drain finito */
     if (comm_tx_byte(CMD_NEW_GAME) != 0) { link_error(); return 2; }
