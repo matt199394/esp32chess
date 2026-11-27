@@ -19,6 +19,17 @@
 ;
 ;   comm_rx_byte ha un timeout: alla scadenza svuota il ring buffer (resync)
 ;   e ritorna -1 invece di bloccare il C64 per sempre.
+;
+;   Il tempo si misura con il jiffy clock del KERNAL ($A0-$A2), che sul C64
+;   e' memorizzato **big-endian**: il byte che cambia 60 volte al secondo e'
+;   $A2. Fonte: UDTIM a $F69B fa `inc $a2` e propaga il riporto su $A1 e poi
+;   su $A0, quindi $A2 e' il LSB (1 jiffy), $A1 cambia ogni 256 jiffy (4,27 s)
+;   e $A0 ogni 65536 (18,2 min). Misurato in VICE contando i cambi dei tre
+;   byte su 120 IRQ: 0, 0, 119. Usare $A0/$A1 rende il timeout 65536x/256x
+;   troppo lungo, cioe' di fatto mai (bug storico, vedi docs/BUGS.md).
+;   Regressione: c64/test_timeout.c (make test-timeout).
+
+JIF_LO = $a2                   ; byte basso del jiffy clock (60 Hz)
 
         .export _comm_install
         .export _comm_tx_byte
@@ -112,7 +123,7 @@ _comm_rx_byte:
         ror _rx_tmo
         lsr _rx_tmo+1
         ror _rx_tmo
-        lda $a0                         ; byte basso del jiffy clock (1/60 s)
+        lda JIF_LO                      ; byte basso del jiffy clock (1/60 s)
         sta _rx_last
         lda #0
         sta _rx_cnt
@@ -123,7 +134,7 @@ _comm_rx_byte:
         lda _rx_tmo
         ora _rx_tmo+1
         beq @wait                       ; timeout 0: attesa infinita
-        lda $a0
+        lda JIF_LO
         cmp _rx_last
         beq @wait
         sta _rx_last

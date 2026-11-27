@@ -1021,13 +1021,17 @@ static void drain_link(void) {
     }
 }
 
-/* Misura il jiffy clock: K = $A0 ticchetta, Z = congelato (IRQ KERNAL
- * morto). Loop a decadenza indipendente dal clock (~0,6 s). */
+/* Misura il jiffy clock: K = ticchetta, Z = congelato (IRQ KERNAL morto).
+ * Loop a decadenza indipendente dal clock (~0,6 s).
+ * NB: il byte che cambia a 60 Hz e' $A2 (jiffy clock big-endian: UDTIM a
+ * $F69B incrementa $A2, poi $A1, poi $A0). Con $A0 si sarebbe sempre
+ * letto "congelato" per ~18 minuti. */
+#define JIF_LO 0xA2
 static u8 clock_probe(u8 x) {
-    u8 a0 = PEEK(0xA0);
+    u8 t0 = PEEK(JIF_LO);
     u16 i;
     for (i = 0; i < 6000u; i++)
-        if (PEEK(0xA0) != a0) break;
+        if (PEEK(JIF_LO) != t0) break;
     scr_put(x, MSG_ROW, to_screen(i < 6000u ? 'K' : 'Z'), COLOR_WHITE);
     return (u8)(i < 6000u);
 }

@@ -78,11 +78,14 @@ portano lì senza spiegazione erano:
 
 - `comm_rx_byte` ora ha firma `int comm_rx_byte(unsigned ms)` (0 = attesa
   infinita): attende al più `ms` millisecondi usando il **byte basso** del
-  jiffy clock del KERNAL (`$A0`, incrementa ogni jiffy = 1/60 s), poi
-  **svuota il ring buffer** e ritorna `-1` invece di bloccare il C64 per
-  sempre. (La prima versione leggeva `$A1`, il byte centrale, che cambia
-  solo ogni 256 jiffy: il timeout risultava ~256× troppo lungo. Il byte
-  basso del clock è `$A0`; `$A2` è quello alto e cambia ogni ~18 minuti.)
+  jiffy clock del KERNAL, poi **svuota il ring buffer** e ritorna `-1` invece
+  di bloccare il C64 per sempre. Il byte basso è **`$A2`**: sul C64 il jiffy
+  clock è memorizzato **big-endian** (`UDTIM` a `$F69B` fa `inc $a2` e
+  propaga il riporto su `$A1` e poi `$A0`), quindi `$A1` cambia ogni 256
+  jiffy (4,27 s) e `$A0` ogni 65536 (18,2 min). **Corretto in `$A2` dopo
+  essere passato per `$A1` e `$A0`** (ogni errore rendeva il timeout 256× o
+  65536× troppo lungo, cioè di fatto mai): vedi "Sessione 10" in fondo e
+  `c64/test_timeout.c` / `make test-timeout`.
 - Nuovo `comm_rx_flush()` per scartare i byte residui prima di inviare un
   comando (le letture tornano allineate al prossimo messaggio).
 - La UI gestisce i timeout: `wait_ack`, `recv_best_payload`, `read_over_tail`
@@ -410,9 +413,9 @@ Con l'ultima UI il C64 si blocca appena scelta la partita (dopo il menu).
 
 ### Analisi
 
-Il sospetto sul timeout su `$A0` non regge: `$A0` e' il byte basso del jiffy
-clock e ora i timeout scattano ai valori giusti (prima, con `$A1`, erano
-256x troppo lunghi; con `$A2` del commit intermedio, 65536x). I punti che
+Il sospetto sul timeout **non** reggeva, ma per il motivo opposto a quello
+scritto allora: il byte usato (`$A0`) non è il byte basso del jiffy clock,
+quindi il timeout non scattava affatto (vedi "Sessione 10"). I punti che
 POSSEVANO bloccare all'avvio erano due:
 
 1. **`comm_tx_byte` attendeva il "pronto" (D7 alto) SENZA timeout**: se
@@ -421,9 +424,10 @@ POSSEVANO bloccare all'avvio erano due:
    subito dopo il menu, senza alcun messaggio. Corretto: attesa del pronto
    limitata a ~58 ms; se scadde, `comm_tx_byte` ritorna -1 e la UI mostra
    LINK ERROR invece di bloccarsi.
-2. La versione intermedia `$A2`: un timeout di 100 ms diventava ~ore, quindi
-   `drain_link()` a inizio partita sembrava un freeze totale. Gia' corretto
-   in `$A0`.
+2. La versione intermedia `$A2`: si **credeva** che un timeout di 100 ms
+   diventasse ~ore. Era il contrario: `$A2` e' il byte giusto (vedi
+   "Sessione 10"); il freeze vero lo dava `$A0`, dove il timeout non
+   scattava affatto.
 
 ### Verifiche
 
@@ -435,8 +439,10 @@ POSSEVANO bloccare all'avvio erano due:
 Con il .prg "last-working" (`$A1`) la partita parte ma solo **~30 secondi**
 dopo la scelta del colore: e' esattamente il timeout di `drain_link()` —
 `comm_rx_byte(100)` = 6+1 tick x 256 jiffy (4,27 s ciascuno con `$A1`) =
-~30 s. L'attesa c'era sempre stata (avvio "lento"); con `$A2` diventava
-~6,5 ore (freeze); con `$A0` (branch attuale) sono 100 ms.
+~30 s. Questa e' la prova che il byte corretto e' **piu' fine di `$A1`**:
+con `$A2` (1 jiffy per tick) sono i ~100 ms previsti. La lettura "con `$A2`
+diventava ~6,5 ore" era un'inferenza, mai misurata, e ha portato a
+scegliere `$A0`, dove il timeout invece non scatta (vedi Sessione 10).
 
 ## Sessione 8 — Freeze permanente con V7 confermata a schermo
 
@@ -525,3 +531,75 @@ $0319 $01`; (2) auto-riparo: al rilevamento di clock morto, `RESTOR`
 ($FF87) + `IOINIT` ($FF84), reinstallazione banco VIC + `$D018` + handler
 NMI (`comm_install`), nuovo probe; se torna K il gioco prosegue (marcatore
 H = healed).
+
+> **Smentita (Sessione 10)**: l'IRQ non era morto e il clock non era
+> congelato. `$A0` e' il byte **alto** del jiffy clock (cambia ogni ~18
+> minuti), quindi il probe K/Z diceva "Z" a ragione ma la conclusione era
+> sbagliata: il clock gira, e' il byte osservato a non muoversi. Il freeze in
+> `drain_link` era il timeout di `comm_rx_byte` su `$A0`, cioe' ~2 ore.
+> Di conseguenza l'auto-riparo `RESTOR`/`IOINIT` della V11 (HEAL) non serve
+> piu' e resta spento: con `$A2` il probe dice sempre K.
+
+## Sessione 10 — Causa vera: il jiffy clock e' BIG-ENDIAN ($A2 = byte basso)
+
+### Sintomo
+
+Il timeout di `comm_rx_byte()` non scattava mai (o dopo ore): `drain_link()`
+a inizio partita sembrava un freeze, il probe K/Z diceva "clock congelato",
+e in VICE un test che chiama `comm_rx_byte(100)` a buffer vuoto restava
+bloccato per sempre.
+
+### Causa
+
+Sul C64 il jiffy clock a `$A0-$A2` e' memorizzato **big-endian**: il byte che
+cambia 60 volte al secondo e' **`$A2`**, non `$A0`. Fonte: il KERNAL, routine
+`UDTIM` a `$F69B`:
+
+```
+F69B  INC $A2     ; 1 jiffy  = 1/60 s   <-- LSB
+F69F  BNE ...
+F6A1  INC $A1     ; ogni 256 jiffy = 4,27 s
+F6A3  BNE ...
+F6A5  INC $A0     ; ogni 65536 jiffy = 18,2 min  <-- MSB
+```
+
+Misura diretta in VICE (`x64sc`, KERNAL standard), contando i cambi dei tre
+byte durante 120 IRQ (~2 s):
+
+```
+$A0: 0 cambi    $A1: 0 cambi    $A2: 119 cambi
+```
+
+Il codice invece conteggiava i cambi di `$A0`: 1 tick ogni ~18 minuti, quindi
+`comm_rx_byte(100)` (~7 tick) = ~2 ore, e `comm_rx_byte(10000)` = giorni. Da
+qui "il clock e' congelato" e il freeze a inizio partita. Nota che `clock()`
+di cc65 usa `RDTIM` ($FFDE), che gestisce i tre byte correttamente: per
+questo i timer a schermo funzionavano mentre il timeout no.
+
+Storia dei byte (tutti i tentativi): `$A1` -> timeout 256x troppo lungo
+(hardware: partita che iniziava dopo ~30 s), `$A0` -> 65536x troppo lungo
+(freeze), `$A2` -> corretto.
+
+### Fix
+
+- `c64/comm.s`: `JIF_LO = $a2` (costante con il commento sul big-endian) al
+  posto di `lda $a0`; corretto il commento.
+- `c64/chessui.c`: `clock_probe()` ora legge `$A2` (con `$A0` diceva sempre
+  "NOCLK"/Z).
+- `c64/test_timeout.c` + `make test-timeout`: regressione eseguibile in VICE
+  headless (bordo verde = ok). Il test misura i tick consumati da
+  `comm_rx_byte()` a ring buffer vuoto sui casi 100/500/2000/10000 ms.
+- `docs/BUGS.md`: corrette le conclusioni delle sessioni 6-8.
+
+### Esito del test (VICE, dopo il fix)
+
+```
+  100 ms -> -1 in   7 tick (attesi 7..9)
+  500 ms -> -1 in  32 tick (attesi 32..34)
+ 2000 ms -> -1 in 126 tick (attesi 126..128)
+10000 ms -> -1 in 627 tick (attesi 626..628)
+TUTTI OK
+```
+
+Con `$A0` lo stesso test restava bloccato sul primo caso (solo il banner a
+schermo): la regressione vede il bug.
