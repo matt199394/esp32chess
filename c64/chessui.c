@@ -538,8 +538,8 @@ static void draw_board(void)
 
     scr_clear();
     scr_puts(0, 0, "ESP32CHESS", COLOR_WHITE);
-    scr_puts(11, 0, "V11", COLOR_WHITE);  /* marcatore build: se non appare,
-                                              sulla C64 gira un .prg vecchio */
+    scr_puts(11, 0, "V12", COLOR_WHITE);  /* marcatore build: se non appare,
+                                            sulla C64 gira un .prg vecchio */
 
     for (f = 0; f < 8; f++)
         scr_put((u8)(BOARD_X + 3 * f + 1), FILE_ROW,
@@ -1008,8 +1008,7 @@ static void link_error(void) {
  * tutto; il tetto DRAIN_GUARD copre il caso di clock fermo.
  * Prima il ritardo era "a loop contato" (2 x 40000 iterazioni = 7,1 s
  * misurati in VICE): un workaround per il clock creduto morto, che in
- * realta' era solo il byte sbagliato ($A0 invece di $A2, vedi BUGS.md).
- * Contatore a schermo (x=8, MSG_ROW) e limite FLOOD: se arrivano piu' di
+ * realta' era solo il byte sbagliato ($A0 invece di $A2, vedi BUGS.md). * Contatore a schermo (x=8, MSG_ROW) e limite FLOOD: se arrivano piu' di
  * 200 byte l'ESP32 trasmette senza sosta e il drain non finirebbe mai. */
 static void drain_link(void) {
     u16 n = 0, guard;
@@ -1025,63 +1024,6 @@ static void drain_link(void) {
             if (n > 200) { put_msg("FLOOD", COLOR_LIGHTRED); return; }
         }
     }
-}
-
-/* Misura il jiffy clock: K = ticchetta, Z = congelato (IRQ KERNAL morto).
- * Loop a decadenza indipendente dal clock (~0,6 s).
- * NB: il byte che cambia a 60 Hz e' $A2 (jiffy clock big-endian: UDTIM a
- * $F69B incrementa $A2, poi $A1, poi $A0). Con $A0 si sarebbe sempre
- * letto "congelato" per ~18 minuti. */
-#define JIF_LO 0xA2
-static u8 clock_probe(u8 x) {
-    u8 t0 = PEEK(JIF_LO);
-    u16 i;
-    for (i = 0; i < 6000u; i++)
-        if (PEEK(JIF_LO) != t0) break;
-    scr_put(x, MSG_ROW, to_screen(i < 6000u ? 'K' : 'Z'), COLOR_WHITE);
-    return (u8)(i < 6000u);
-}
-
-/* Riga di esadecimali a schermo, per la diagnostica */
-static void dump_line(u8 y, char tag, const u16 *regs, u8 n) {
-    static const char hx[] = "0123456789ABCDEF";
-    char b[16];
-    u8 i = 2, k, r;
-    b[0] = tag;
-    b[1] = ':';
-    for (k = 0; k < n; k++) {
-        r = PEEK(regs[k]);
-        b[i++] = hx[r >> 4];
-        b[i++] = hx[r & 15];
-        if (k < n - 1) b[i++] = ' ';
-    }
-    b[i] = 0;
-    scr_puts(0, y, b, COLOR_YELLOW);
-}
-
-/* Se il clock e' morto, mostra i registri chiave per capire il perche':
- * A: $DC0D (latch IRQ CIA1), $DC0E (controllo timer A CIA1), $DC04/$DC05
- *    (preload timer A: se cambiati, il tick non e' piu' a 60 Hz)
- * B: $DD0D (latch NMI CIA2), $DD0E, $0314/$0315 (vettore IRQ: stock 31 EA)
- * D: $0318/$0319 (vettore NMI = nostro handler), $01 (config memoria)
- * Attenzione: leggere $DC0D/$DD0D acknota gli interrupt pendenti. */
-static void dump_cia(void) {
-    u16 r1[4], r2[4], r3[3];
-    r1[0] = 0xDC0D; r1[1] = 0xDC0E; r1[2] = 0xDC04; r1[3] = 0xDC05;
-    r2[0] = 0xDD0D; r2[1] = 0xDD0E; r2[2] = 0x0314; r2[3] = 0x0315;
-    r3[0] = 0x0318; r3[1] = 0x0319; r3[2] = 0x0001;
-    dump_line(OVER_ROW,     'A', r1, 4);
-    dump_line(OVER_ROW + 1, 'B', r2, 4);
-    dump_line(OVER_ROW + 2, 'D', r3, 3);
-}
-
-/* Riporta il jiffy clock in vita: RESTOR ($FF87) ripristina i vettori
- * KERNAL (incluso $0314 -> $EA31), IOINIT ($FF84) reinizializza le CIA
- * (timer A a 60 Hz + mask IRQ). Poi banco VIC e handler NMI vanno
- * reinstallati a mano (IOINIT tocca $DD00, RESTOR ripristina $0318). */
-static void kernal_reinit(void) {
-    __asm__("jsr $ff87");
-    __asm__("jsr $ff84");
 }
 
 /* Ritorna 1 se e' arrivato l'ACK, 0 su timeout/errore. La consegna dei
@@ -1229,7 +1171,8 @@ static unsigned char recv_engine_move(void) {
     int r;
     unsigned char reason, winner;
 
-    scr_puts(6, MSG_ROW, "H", COLOR_WHITE);   /* tracer: dentro attesa mossa */
+    scr_blank(0, PROMPT_ROW, PANEL_W, COLOR_BLACK);
+    scr_blank(0, MSG_ROW, 12, COLOR_BLACK);      /* via la scritta THINKING */
     r = wait_rsp();
     if (r < 0) { link_error(); return 2; }
     scr_blank(0, PROMPT_ROW, PANEL_W, COLOR_BLACK);
@@ -1259,30 +1202,10 @@ static unsigned char start_new_game(void) {
     segWho = SEG_PLAYER;
     draw_board();
 
-    /* tracer: lettere A-H su MSG_ROW per localizzare un eventuale freeze;
-     * la lettera piu' avanzata visibile = ultimo punto raggiunto */
-    scr_puts(0, MSG_ROW, "A", COLOR_WHITE);   /* prima di drain_link */
-    if (!clock_probe(7)) {                    /* Z = jiffy clock congelato */
-        put_msg("HEAL", COLOR_YELLOW);
-        dump_cia();                           /* stato PRIMA del reinit */
-        kernal_reinit();
-        POKE(0xDD00, (u8)((PEEK(0xDD00) & 0xFC) | 0x01));
-        POKE(0xD018, 0x13);
-        comm_install();
-        if (!clock_probe(14)) {               /* Z anche dopo il reinit */
-            put_msg("NOCLK", COLOR_LIGHTRED);
-            return 2;
-        }
-        scr_puts(9, MSG_ROW, "H", COLOR_WHITE);   /* guarito */
-    }
     drain_link();
-    scr_puts(1, MSG_ROW, "B", COLOR_WHITE);   /* drain finito */
     if (comm_tx_byte(CMD_NEW_GAME) != 0) { link_error(); return 2; }
-    scr_puts(2, MSG_ROW, "C", COLOR_WHITE);   /* NEW_GAME trasmesso */
-    if (wait_ack()) scr_puts(3, MSG_ROW, "D", COLOR_WHITE);
-    else            scr_puts(3, MSG_ROW, "E", COLOR_WHITE);
+    (void)wait_ack();
     show_history();
-    scr_puts(4, MSG_ROW, "F", COLOR_WHITE);
     if (humanColor != BLACK) return 0;
     return recv_engine_move();
 }
@@ -1388,7 +1311,6 @@ static u8 game_loop(void) {
     u8 from, p, reason, winner, rc;
     int rsp;
 
-    scr_puts(5, MSG_ROW, "G", COLOR_WHITE);   /* tracer: game_loop raggiunto */
     for (;;) {
         show_timers();
         seg_open(SEG_PLAYER);
@@ -1524,11 +1446,9 @@ int main(void)
     POKE(0xD021, COLOR_BLACK);               /* sfondo */
     POKE(0xDD00, (u8)((PEEK(0xDD00) & 0xFC) | 0x01));  /* banca VIC 2 */
     POKE(0xD018, 0x13);                      /* schermo $8400, charset $8800 */
-    clock_probe(10);                         /* P1: appena RUNtato */
 
     comm_install();                          /* handler NMI al piu' presto */
     install_charset();
-    clock_probe(11);                         /* P2: dopo setup */
 
     new_board_local();
     humanColor = WHITE;
@@ -1550,7 +1470,6 @@ int main(void)
         level = ask_level();
         humanColor = ask_color();
         flip = (humanColor == BLACK) ? 1 : 0;
-        clock_probe(12);                     /* P3: dopo il menu */
 
         draw_board();
 
@@ -1562,7 +1481,6 @@ int main(void)
         }
         (void)wait_ack();
         (void)wait_ack();
-        clock_probe(13);                     /* P4: dopo SET_COLOR/SET_LEVEL */
 
         rc = start_new_game();
         if (rc == 2) return 1;

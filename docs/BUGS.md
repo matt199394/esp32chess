@@ -629,3 +629,11 @@ osservati. Non era colpa del link: era attesa morta.
 fermo, cosi' non si puo' tornare a un'attesa illimitata.
 
 Misura in VICE dello stesso codice: **6 jiffies = 100 ms** (era 429).
+
+### Pulizia (V12)
+
+Con la causa vera chiusa, rimossa la strumentazione che serviva alla caccia:
+lettere tracer A-H su `MSG_ROW`, `dump_cia()`/`dump_line()`,
+`kernal_reinit()` (HEAL/NOCLK) e le probe del clock P1-P5. Il marcatore di
+build a schermo passa a **V12** (i `.prg` precedenti si riconoscono cosi').
+`drain_link()` resta quello nuovo (deadline sul clock + `DRAIN_GUARD`).
