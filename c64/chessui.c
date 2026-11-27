@@ -538,6 +538,8 @@ static void draw_board(void)
 
     scr_clear();
     scr_puts(0, 0, "ESP32CHESS", COLOR_WHITE);
+    scr_puts(11, 0, "V7", COLOR_WHITE);   /* marcatore build: se non appare,
+                                              sulla C64 gira un .prg vecchio */
 
     for (f = 0; f < 8; f++)
         scr_put((u8)(BOARD_X + 3 * f + 1), FILE_ROW,
