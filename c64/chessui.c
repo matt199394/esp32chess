@@ -598,7 +598,7 @@ static void draw_board(void)
 
     scr_clear();
     scr_puts(0, 0, "ESP32CHESS", COLOR_WHITE);
-    scr_puts(11, 0, "V14", COLOR_WHITE);  /* marcatore build: se non appare,
+    scr_puts(11, 0, "V15", COLOR_WHITE);  /* marcatore build: se non appare,
                                             sulla C64 gira un .prg vecchio */
 
     for (f = 0; f < 8; f++)
@@ -1330,6 +1330,20 @@ static unsigned char resync_board(void) {
     return 1;
 }
 
+/* Recupero automatico SENZA interrompere la partita: un byte perso in volo
+ * non deve piu' mostrare LINK ERROR (sintomo su hardware: dopo ~20 mosse).
+ * Prova un resync silenzioso (drain + colore/livello + GET_HIST: la board
+ * viene ricostruita dallo stato vero dell'ESP32); solo se anche il resync
+ * fallisce mostra LINK ERROR. Ritorna 1 se la partita puo' continuare. */
+static unsigned char recover_link(void) {
+    if (resync_board()) {
+        scr_blank(0, MSG_ROW, PANEL_W, COLOR_BLACK);   /* via il contatore drain */
+        return 1;
+    }
+    link_error();
+    return 0;
+}
+
 /* Ritorna 0 ok, 1 se il collegamento e' morto (game_loop deve uscire). */
 static unsigned char do_undo(void) {
     u16 i;
@@ -1338,10 +1352,8 @@ static unsigned char do_undo(void) {
         sfx_error();
         return 0;
     }
-    if (comm_tx_byte(CMD_UNDO) != 0) {
-        link_error();
-        return resync_board() ? 0 : 1;
-    }
+    if (comm_tx_byte(CMD_UNDO) != 0)
+        return recover_link() ? 0 : 1;
     (void)wait_ack();
 
     histN -= 2;
@@ -1399,8 +1411,7 @@ static u8 game_loop(void) {
         ui_apply_move(m);          /* mossa del giocatore visibile subito */
         comm_rx_flush();
         if (send_move(m) != 0) {   /* l'ESP32 non ha confermato: resync */
-            link_error();
-            if (!resync_board()) return 0;
+            if (!recover_link()) return 0;
             continue;
         }
 
@@ -1413,8 +1424,7 @@ static u8 game_loop(void) {
         if (rsp == RSP_MOVED) {
             int f = comm_rx_byte(RX_TIMEOUT_BYTE);
             if (f < 0) {
-                link_error();
-                if (!resync_board()) return 0;
+                if (!recover_link()) return 0;
                 continue;
             }
             if (f & F_CHECK) {                /* la tua mossa ha dato scacco */
@@ -1451,8 +1461,7 @@ static u8 game_loop(void) {
             if (histN < 400) hist[histN++] = m;
             rc = recv_best_payload();
             if (rc == 2) {
-                link_error();
-                if (!resync_board()) return 0;
+                if (!recover_link()) return 0;
                 continue;
             }
             if (rc == 1) {          /* show_game_over ha chiesto nuova/esci */
@@ -1461,8 +1470,7 @@ static u8 game_loop(void) {
             continue;
         }
         /* risposta ignota o assente: protocollo sfasato, non prosegue a vuoto */
-        link_error();
-        if (!resync_board()) return 0;
+        if (!recover_link()) return 0;
     }
 }
 

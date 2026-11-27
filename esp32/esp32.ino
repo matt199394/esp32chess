@@ -72,22 +72,34 @@ static void outByte(byte c) {
   for (int i = 0; i < 8; i++) gpio_set_level((gpio_num_t)busD[i], (c >> i) & 1);
 }
 
-/* ESP32 -> C64: byte su D0..D7 + impulso su /NMI, poi attesa della lettura. */
-static void busSendByte(byte b) {
+/* ESP32 -> C64: byte su D0..D7 + impulso su /NMI, poi attesa della lettura.
+ * Se l'ack non arriva, il byte NON va abbandonato: resterebbe un buco nello
+ * stream e il C64 si desincronizzerebbe (sintomo: LINK ERROR dopo ~20 mosse).
+ * Il byte resta sul bus e se il C64 non ha letto $DF00 (nessun ack) si puo'
+ * ripetere l'impulso /NMI senza rischio di doppia consegna: se il C64 avesse
+ * letto, l'ack sarebbe arrivato. Ritorna true se consegnato. */
+static bool busSendByte(byte b) {
   outByte(b);
-  io2 = false;
-  nmiArm = true;          /* solo le letture successive all'annuncio contano */
-  digitalWrite(oC64NMI, HIGH);
-  delayMicroseconds(150);
-  digitalWrite(oC64NMI, LOW);
-  uint32_t t0 = micros();
-  while (!io2) {
-    if (micros() - t0 > 50000) break;  /* timeout 50 ms: abbandona */
-    delayMicroseconds(10);
+  for (uint8_t attempt = 0; attempt < 5; attempt++) {
+    io2 = false;
+    nmiArm = true;        /* solo le letture successive all'annuncio contano */
+    digitalWrite(oC64NMI, HIGH);
+    delayMicroseconds(150);
+    digitalWrite(oC64NMI, LOW);
+    uint32_t t0 = micros();
+    while (!io2) {
+      if (micros() - t0 > 20000) break;  /* timeout 20 ms per tentativo */
+      delayMicroseconds(10);
+    }
+    nmiArm = false;
+    if (io2) {
+      delayMicroseconds(100); /* margine: l'handler NMI completa la copia */
+      io2 = false;
+      return true;
+    }
   }
-  nmiArm = false;
-  delayMicroseconds(100); /* margine: l'handler NMI completa la copia */
   io2 = false;
+  return false;
 }
 
 /* C64 -> ESP32: alza D7 (pronto) e attende che l'ISR catturi un byte.
@@ -135,7 +147,10 @@ static void linkSetup() {
   Serial.println("[chess] linkSetup ok");
 }
 static int  linkReadByte(uint32_t timeoutMs) { return busReadByte(timeoutMs); }
-static void linkWriteByte(byte b)            { busSendByte(b); }
+static void linkWriteByte(byte b) {
+  if (!busSendByte(b))
+    DBG("[chess] TX: byte 0x%02X perso (nessun ack dopo 5 impulsi)\n", b);
+}
 
 #else
 

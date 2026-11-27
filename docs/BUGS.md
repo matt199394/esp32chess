@@ -736,3 +736,53 @@ Su richiesta dell'utente il multicolor e' stato tolto. Le FORME dei pezzi
 - colori originali ripristinati: case GRAY3/BLU, ultima mossa GIALLO,
   cursore CIANO, avvisi LIGHTRED, niente $D016/$D022/$D023.
 - Marcatore di build: **V14**. Build senza warning, BSS fine $4B1C.
+
+---
+
+## Sessione 14 — LINK ERROR dopo ~20 mosse
+
+### Sintomo (hardware, build V14)
+
+A grafica approvata, dopo circa 20 mosse di gioco compare **LINK ERROR** a
+partita in corso.
+
+### Analisi
+
+Due debolezze residue del trasporto, la prima determinante:
+
+1. **`busSendByte` (ESP32) abbandonava il byte in silenzio**: se l'ack I/O2
+   non arrivava entro 50 ms, il firmware passava comunque al byte
+   successivo senza ripetere l'impulso /NMI. Il C64 non vedrebbe MAI quel
+   byte: stream desincronizzato, il primo byte "strano" o il timeout di
+   `comm_rx_byte` producevano LINK ERROR. Un singolo ack perso in tutta la
+   partita bastava.
+2. **Lato C64 ogni anomalia era visibile**: i punti di errore del game loop
+   facevano `link_error()` (messaggio + attesa di un tasto) PRIMA di
+   `resync_board()`, anche quando il resync silenzioso avrebbe riparato
+   tutto senza interrompere la partita.
+
+Il meccanismo di perdita plausibile: un impulso /NMI perso o un fronte
+/I/O2 mancato (ISR lenta, rumore, races a ~µs) diventavano un byte perso
+perché il lato ESP32 non aveva nessun tentativo successivo.
+
+### Fix (V15)
+
+- `esp32/esp32.ino`: `busSendByte` **ripete l'impulso /NMI fino a 5 volte**
+  (20 ms per tentativo, ~100 ms totali) prima di dichiarare il byte perso.
+  Ripetere e' sicuro: il byte resta su D0..D7 e se il C64 avesse gia'
+  letto $DF00 l'ack sarebbe arrivato (niente doppia consegna). Su fallimento
+  finale c'e' un messaggio su Serial (debug).
+- `c64/chessui.c`: nuova `recover_link()`: prova un **resync silenzioso**
+  (drain + colore/livello + GET_HIST + ricostruzione board) e mostra
+  LINK ERROR solo se anche il resync fallisce. Usata in `do_undo` e in tutti
+  i punti di errore del game loop (send_move fallita, flag MOVED perso,
+  payload BEST_MOVE interrotto, risposta ignota). Un byte perso in volo ora
+  si ripara senza schermo blu e senza premere tasti.
+- Marcatore di build: **V15**.
+
+### Verifica
+
+- Build cc65 senza warning; BSS totale $46D, RODATA $6A5 (sotto $8400).
+- `g++ -fsyntax-only -std=gnu++11 -DUSE_C64_BUS` su `esp32.ino`: OK.
+- Su hardware: l'utente deve **riflashare l'ESP32** (il retry dell'impulso
+  NMI e' lato firmware) e ricaricare il .prg V15; poi partita lunga di test.
