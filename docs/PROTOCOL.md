@@ -60,6 +60,8 @@ Tutti i comandi sono **1 byte + eventuali parametri**; tutte le risposte sono
 | `QUIT`      | `0x51` 'Q' | — | fine / torna al menu |
 | `GET_HIST`  | `0x47` 'G' | — | chiede lo storico mosse (resync) |
 | `GO`        | `0x45` 'E' | — | muovi se è il turno del computer, altrimenti `ACK` |
+| `FAME_LOAD` | `0x46` 'F' | 1 byte: indice partita famosa (0..29) | prepara il replay: `ACK` + n lo + n hi (n = semimosse della partita) |
+| `FAME_NEXT` | `0x50` 'P' | — | applica la prossima semimossa della partita famosa: `MOVED` + flags + mossa lo + mossa hi, oppure `GAME_OVER` a lista esaurita |
 
 ### ESP32 → C64
 
@@ -70,7 +72,7 @@ Tutti i comandi sono **1 byte + eventuali parametri**; tutte le risposte sono
 | `0x02` | `BEST_MOVE` | mossa lo, mossa hi, score lo, score hi, depth (u8), flags (u8) | risposta del computer |
 | `0x03` | `GAME_OVER` | reason (u8), winner (u8) | fine partita |
 | `0x04` | `HIST`      | n lo, n hi, poi n mosse (lo, hi) | storico completo della partita |
-| `0x05` | `MOVED`     | flags (u8) | mossa dell'umano accettata; flag = scacco dato + patte reclamabili. Inviato subito dopo `MOVE`, prima del think; segue `BEST_MOVE` o `GAME_OVER` |
+| `0x05` | `MOVED`     | flags (u8) | mossa dell'umano accettata; flag = scacco dato + patte reclamabili. Inviato subito dopo `MOVE`, prima del think; segue `BEST_MOVE` o `GAME_OVER`. Nel replay delle famose il payload è flags + mossa lo + mossa hi |
 
 ### Codifica mossa (16 bit, identica su entrambi i lati)
 
@@ -96,12 +98,26 @@ bit 14..15 promozione: 0=N, 1=B, 2=R, 3=Q
 
 ### `GAME_OVER`
 
-Chiudono la partita solo le patte **automatiche**; `reason`: 1 matto,
+Chiudono la partita solo le patte **automatiche**; `reason`: 0 lista semimosse
+esaurita (replay delle famose: risultato storico, non un matto), 1 matto,
 2 stallo, 3 regola dei 75 halfmove, 4 ripetizione 5 volte, 5 materiale
 insufficiente. Le patte reclamabili (50 halfmove, tripla ripetizione) NON
 chiudono la partita: arrivano come flag `F_DRAW50`/`F_DRAWREP` e la UI le
 mostra come avviso.
 `winner`: 0 bianco, 1 nero, `0xFF` = patta.
+
+## Replay delle partite famose
+
+Le 30 partite sono archiviate in flash sull'ESP32 (`esp32/famous_games.h`,
+generate e validate da `tools/pgn2moves.c`, una per volta:
+
+1. il C64 manda `FAME_LOAD` + indice: l'ESP32 riparte dalla posizione
+   iniziale e risponde `ACK` + n lo + n hi;
+2. il C64 manda `FAME_NEXT` per ogni semimossa (con la sua cadenza di
+   display): l'ESP32 la applica e risponde `MOVED` + flags + mossa lo/hi,
+   così il C64 disegna solo le case toccate e calcola la SAN locale;
+3. dopo l'ultima semimossa un ulteriore `FAME_NEXT` chiude con
+   `GAME_OVER` reason 0 e il risultato storico.
 
 ## Flusso di una partita
 

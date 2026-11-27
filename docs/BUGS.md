@@ -787,3 +787,42 @@ perché il lato ESP32 non aveva nessun tentativo successivo.
 - `g++ -fsyntax-only -std=gnu++11 -DUSE_C64_BUS` su `esp32.ino`: OK.
 - Su hardware: l'utente deve **riflashare l'ESP32** (il retry dell'impulso
   NMI e' lato firmware) e ricaricare il .prg V15; poi partita lunga di test.
+
+---
+
+## Sessione 15 — SAN, undo, replay partite famose
+
+### Cosa
+
+- **Cronologia in SAN**: la colonna sinistra ora mostra la notazione
+  algebrica internazionale (`12.Nf3 Nc6`, catture `exd5`, promozioni
+  `e8=Q`, arrocco `O-O/O-O-O`, disambiguazioni `Nbd2`/`R1c2`). La SAN è
+  calcolata **sul C64** sulla board locale (nuove `san_of_move`/
+  `san_reaches`/`san_slide` in `c64/chessui.c`), per ogni semimossa
+  PRIMA che venga applicata; le stringhe vivono in `histSan[400][8]`.
+  Anche il pannello `AI:` mostra la SAN (con `+` in caso di scacco).
+- **Undo**: già presente col tasto `u`, ora coerente con la SAN
+  (`histN -= 2` tronca anche `histSan`); intestazione colonna diventata
+  `MOSSE u=undo`.
+- **Partite famose**: 30 partite archiviate in flash sull'ESP32
+  (`esp32/famous_games.h`, generate e validate mossa per mossa dal
+  motore vero con `tools/pgn2moves.c`: build PC con gcc, input SAN in
+  `tools/`, output header). Nuovi comandi `FAME_LOAD` (0x46 'F') e
+  `FAME_NEXT` (0x50 'P') in `protocol.h` (entrambe le copie) +
+  `docs/PROTOCOL.md`. Sul C64: voce `P FAMOSE` nel menu principale,
+  sottomenu a 3 pagine (1-9/0 seleziona, SPAZIO pagina, '.' indietro),
+  `replay_loop` che applica una semimossa al secondo (SPAZIO = pausa,
+  altro tasto = interrompe e torna al menu). A lista esaurita
+  `GAME_OVER` con `reason 0` = risultato storico (mostrato come
+  "FINE PARTITA" + vincitore/patta).
+- Marcatore di build: **V16**.
+
+### Verifica
+
+- `tools/pgn2moves.c` su PC: 30 partite, 2143 semimosse, **0 errori**
+  (ogni mossa SAN validata con `legal_moves()` del motore reale).
+- Build cc65 senza warning (solo i soliti pointer-signedness); BSS fino
+  a $6973, sotto $8400.
+- `g++ -fsyntax-only -std=gnu++11 -DUSE_C64_BUS` su `esp32.ino`: OK.
+- Su hardware: flashare l'ESP32 (nuovi comandi FAME) e ricaricare il
+  .prg V16; testare replay, SAN e undo.

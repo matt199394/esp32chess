@@ -4,6 +4,8 @@
  * neri solidi, bianchi a contorno), effetti sonori SID,
  * joystick e due timer (giocatore e AI). La mossa del giocatore viene
  * mostrata subito sulla scacchiera, prima ancora che l'ESP32 risponda.
+ * Cronologia in notazione algebrica internazionale (SAN, calcolata sul
+ * C64), undo con 'u' e replay delle partite famose archiviate sull'ESP32.
  *
  * Il C64 NON genera mosse ne' valuta: mantiene solo una copia della
  * posizione per il display (lboard); la legalita' la decide sempre l'ESP32.
@@ -98,6 +100,44 @@ static s8 lep;                      /* casa en passant (per il display) */
 
 static u16 hist[400];
 static u16 histN;
+static u8 histSan[400][8];          /* SAN di ogni semimossa (per show_history) */
+static u8 pendSan[8];               /* SAN della mossa in attesa di conferma */
+
+/* partite famose: mantieni allineato con FAME_COUNT in esp32/famous_games.h
+ * (le etichette sono solo per il menu C64; le mosse stanno sull'ESP32) */
+#define FAME_N 30
+static const char * const fameLabel[FAME_N] = {
+    "1 IMMORTAL 1851",
+    "2 EVERGREEN 1852",
+    "3 OPERA 1858",
+    "4 STEINITZ-BARDELEBEN 1895",
+    "5 LASKER-BAUER 1889",
+    "6 ROTLEWI-RUBINSTEIN 1907",
+    "7 MARSHALL-LEVITSKY 1912",
+    "8 LASKER-CAPABLANCA 1914",
+    "9 ALEKHINE-NIMZOWITSCH 1930",
+    "10 BYRNE-FISCHER 1956",
+    "11 SPASSKY-BRONSTEIN 1960",
+    "12 TAL-LARSEN 1965",
+    "13 FISCHER-SPASSKY 1972 G6",
+    "14 KARPOV-KASPAROV 1985 G16",
+    "15 KARPOV-KASPAROV 1985 G24",
+    "16 KASPAROV-ANAND 1995 G10",
+    "17 IVANCHUK-YUSUPOV 1991",
+    "18 SHORT-TIMMAN 1991",
+    "19 BELIAVSKY-NUNN 1985",
+    "20 POLUGAEVSKY-NEZHMETDINOV 1958",
+    "21 KASPAROV-TOPALOV 1999",
+    "22 DEEP BLUE-KASPAROV 1997 G6",
+    "23 KARPOV-KASPAROV 1985 G22",
+    "24 KASPAROV-KRAMNIK 2000 G2",
+    "25 ARONIAN-ANAND 2013",
+    "26 CARLSEN-KARJAKIN 2016 G10",
+    "27 CARLSEN-CARUANA 2018 TB1",
+    "28 DING-NEPOMNIACHTCHI 2023 G6",
+    "29 CARLSEN-ANAND 2013 G5",
+    "30 KASPAROV-TOPALOV 1999",
+};
 
 static u8 humanColor;
 static u8 level;
@@ -598,7 +638,7 @@ static void draw_board(void)
 
     scr_clear();
     scr_puts(0, 0, "ESP32CHESS", COLOR_WHITE);
-    scr_puts(11, 0, "V15", COLOR_WHITE);  /* marcatore build: se non appare,
+    scr_puts(11, 0, "V16", COLOR_WHITE);  /* marcatore build: se non appare,
                                             sulla C64 gira un .prg vecchio */
 
     for (f = 0; f < 8; f++)
@@ -713,17 +753,144 @@ static void show_status(void)
 }
 
 /* ================================================================== */
-/* cronologia mosse (colonna sinistra): coppie "12.e2e4 e7e5",         */
+/* SAN (notazione algebrica internazionale) sulla board locale         */
+/* ================================================================== */
+
+/* 1 = da `from` a `to` in linea retta (diag/straight) senza ostacoli */
+static int san_slide(u8 from, u8 to, int diag, int straight)
+{
+    int df = (int)(to & 7) - (int)(from & 7);
+    int dr = (int)(to >> 4) - (int)(from >> 4);
+    int sf, sr, f, r;
+
+    if (diag && dr != 0 && dr == df)          sf = (df > 0) - (df < 0), sr = 1;
+    else if (diag && dr != 0 && dr == -df)    sf = (df > 0) - (df < 0), sr = -1;
+    else if (straight && dr == 0 && df != 0)  sf = (df > 0) - (df < 0), sr = 0;
+    else if (straight && df == 0 && dr != 0)  sf = 0, sr = (dr > 0) - (dr < 0);
+    else return 0;
+
+    f = (int)(from & 7) + sf;
+    r = (int)(from >> 4) + sr;
+    for (;;) {
+        if (f == (int)(to & 7) && r == (int)(to >> 4)) return 1;
+        if (lboard[(u8)((r << 4) | f)] != EMPTY) return 0;
+        f += sf; r += sr;
+    }
+}
+
+/* 1 = il pezzo su sq (stesso tipo) puo' raggiungere `to` pseudo-legalmente */
+static int san_reaches(u8 sq, u8 to, u8 pt)
+{
+    int df = (int)(to & 7) - (int)(sq & 7);
+    int dr = (int)(to >> 4) - (int)(sq >> 4);
+    int adf = df < 0 ? -df : df, adr = dr < 0 ? -dr : dr;
+
+    if (sq == to) return 0;
+    if (lboard[to] != EMPTY && PT(lboard[to]) == KING) return 0;
+    switch (pt) {
+        case KNIGHT:  return (adf == 1 && adr == 2) || (adf == 2 && adr == 1);
+        case BISHOP:  return san_slide(sq, to, 1, 0);
+        case ROOK:    return san_slide(sq, to, 0, 1);
+        case QUEEN:   return san_slide(sq, to, 1, 1);
+        case KING:    return (adf <= 1 && adr <= 1);
+        case PAWN: {
+            int fwd = (PC(lboard[sq]) == WHITE) ? 1 : -1;
+            int r0 = (int)(sq >> 4);
+            if (df == 0 && dr == fwd && lboard[to] == EMPTY) return 1;
+            if (df == 0 && dr == 2 * fwd && (r0 == 1 || r0 == 6) &&
+                lboard[(u8)(sq + 16 * fwd)] == EMPTY && lboard[to] == EMPTY) return 1;
+            if ((df == 1 || df == -1) && dr == fwd && lboard[to] != EMPTY) return 1;
+            return 0;
+        }
+        default: return 0;
+    }
+}
+
+/* SAN della mossa m (board locale PRIMA di applicarla), senza suffissi
+ * +/#. buf >= 8 byte: il massimo e' "Qh4xe1" (7). */
+static void san_of_move(u16 m, char *buf)
+{
+    u8 from = M_FROM(m), to = M_TO(m), pr = M_PROMO(m);
+    u8 p = lboard[from], pt = PT(p), pc = PC(p);
+    u8 others[16], no = 0, k;
+    u8 r, f, sq;
+    int pos = 0;
+    int isEp = (pt == PAWN && (u8)to == (u8)lep && (to & 7) != (from & 7));
+    int capture = (lboard[to] != EMPTY) || isEp;
+
+    if (pt == KING && ((u8)(to - from) == 2 || (u8)(from - to) == 2)) {
+        strcpy(buf, (to > from) ? "O-O" : "O-O-O");
+        return;
+    }
+
+    if (pt != PAWN) {
+        /* altre case con un pezzo equivalente che puo' andare su `to`:
+         * serve la disambiguazione (file, rank o entrambe) */
+        for (r = 0; r < 8; r++)
+            for (f = 0; f < 8; f++) {
+                sq = (u8)((r << 4) | f);
+                if (sq != from && PT(lboard[sq]) == pt && PC(lboard[sq]) == pc &&
+                    san_reaches(sq, to, pt) && no < 16)
+                    others[no++] = sq;
+            }
+        buf[pos++] = " PNBRQK"[pt];
+        if (no) {
+            int fSame = 0, rSame = 0;
+            for (k = 0; k < no; k++) {
+                if ((others[k] & 7) == (from & 7)) fSame = 1;
+                if ((others[k] >> 4) == (from >> 4)) rSame = 1;
+            }
+            if (!fSame)      buf[pos++] = (char)('a' + (from & 7));
+            else if (!rSame) buf[pos++] = (char)('1' + (from >> 4));
+            else {
+                buf[pos++] = (char)('a' + (from & 7));
+                buf[pos++] = (char)('1' + (from >> 4));
+            }
+        }
+        if (capture) buf[pos++] = 'x';
+    } else if (capture) {
+        buf[pos++] = (char)('a' + (from & 7));
+        buf[pos++] = 'x';
+    }
+
+    buf[pos++] = (char)('a' + (to & 7));
+    buf[pos++] = (char)('1' + (to >> 4));
+    if (pt == PAWN && ((to >> 4) == 0 || (to >> 4) == 7)) {
+        buf[pos++] = '=';
+        buf[pos++] = "NBRQ"[pr];
+    }
+    buf[pos] = 0;
+}
+
+/* ================================================================== */
+/* cronologia mosse (colonna sinistra): coppie SAN "12.Nf3 Nc6",        */
 /* scorre sulle ultime 2*HIST_ROWS semimosse                           */
 /* ================================================================== */
 
+static void hist_push(u16 m, const char *san)
+{
+    if (histN >= 400) return;
+    hist[histN] = m;
+    memcpy(histSan[histN], san, 8);
+    histN++;
+}
+
+/* copia clampata: al massimo maxc caratteri di s (SENza garanzia di NUL) */
+static int line_put(char *line, int pos, const u8 *s, int max, int maxc)
+{
+    int i;
+    for (i = 0; i < maxc && s[i] && pos < max; i++)
+        line[pos++] = (char)s[i];
+    return pos;
+}
+
 static void show_history(void)
 {
-    char line[14];
-    u16 npairs, first, pn, wi, bi;
+    char line[24];
+    u16 npairs, first, pn;
     u8 row, pos, num;
 
-    scr_puts(0, HIST_HEAD, "MOSSE u=ind", COLOR_WHITE);
+    scr_puts(0, HIST_HEAD, "MOSSE u=undo", COLOR_WHITE);
     for (row = 0; row < HIST_ROWS; row++)
         scr_blank(0, HIST_ROW + row, PANEL_W, COLOR_BLACK);
 
@@ -738,18 +905,10 @@ static void show_history(void)
         if (num >= 10)  line[pos++] = (char)('0' + (num / 10) % 10);
         line[pos++] = (char)('0' + num % 10);
         line[pos++] = '.';
-        wi = (u16)(pn * 2);
-        bi = (u16)(pn * 2 + 1);
-        line[pos++] = (char)('a' + (M_FROM(hist[wi]) & 7));
-        line[pos++] = (char)('1' + (M_FROM(hist[wi]) >> 4));
-        line[pos++] = (char)('a' + (M_TO(hist[wi]) & 7));
-        line[pos++] = (char)('1' + (M_TO(hist[wi]) >> 4));
-        if (bi < histN) {
+        pos = line_put(line, pos, histSan[pn * 2], PANEL_W, 8);
+        if (pn * 2 + 1 < histN && pos < PANEL_W) {
             line[pos++] = ' ';
-            line[pos++] = (char)('a' + (M_FROM(hist[bi]) & 7));
-            line[pos++] = (char)('1' + (M_FROM(hist[bi]) >> 4));
-            line[pos++] = (char)('a' + (M_TO(hist[bi]) & 7));
-            line[pos++] = (char)('1' + (M_TO(hist[bi]) >> 4));
+            pos = line_put(line, pos, histSan[pn * 2 + 1], PANEL_W, 8);
         }
         line[pos] = 0;
         scr_puts(0, HIST_ROW + row, line, COLOR_WHITE);
@@ -1154,7 +1313,9 @@ static void show_game_over(u8 reason, u8 winner) {
 
     if (reason >= 1 && reason <= 5)
         scr_puts(0, OVER_ROW, rtxt[reason - 1], COLOR_YELLOW);
-    if (reason == OVER_MATE)
+    else
+        scr_puts(0, OVER_ROW, "FINE PARTITA", COLOR_YELLOW);
+    if (reason == OVER_MATE || (reason == 0 && winner != WINNER_DRAW))
         scr_puts(0, OVER_WHO_ROW,
                  winner == WINNER_WHITE ? "BIANCO VINCE" : "NERO VINCE", COLOR_YELLOW);
     else
@@ -1194,8 +1355,9 @@ static unsigned char recv_best_payload(void) {
     aiScore = (s16)score;
     aiDepth = depth;
 
+    san_of_move(m, pendSan);          /* SAN: board PRIMA della mossa */
     ui_apply_move(m);
-    if (histN < 400) hist[histN++] = m;
+    hist_push(m, (const char *)pendSan);
     show_history();
 
     /* DOPO ui_apply_move: la mossa azzera checkFlag/drawNote, il flag del
@@ -1205,12 +1367,11 @@ static unsigned char recv_best_payload(void) {
     if (flags & F_DRAW50)       drawNote = 1;
     else if (flags & F_DRAWREP) drawNote = 2;
 
-    aiMove[0] = (char)('a' + (M_FROM(m) & 7));
-    aiMove[1] = (char)('1' + (M_FROM(m) >> 4));
-    aiMove[2] = '-';
-    aiMove[3] = (char)('a' + (M_TO(m) & 7));
-    aiMove[4] = (char)('1' + (M_TO(m) >> 4));
-    aiMove[5] = 0;
+    memcpy(aiMove, pendSan, sizeof(aiMove));
+    if (checkFlag) {
+        u8 l = (u8)strlen(aiMove);
+        if (l < sizeof(aiMove) - 1) { aiMove[l] = '+'; aiMove[l + 1] = 0; }
+    }
     hasAiMove = 1;
 
     show_status();
@@ -1304,8 +1465,9 @@ static unsigned char resync_board(void) {
         m = (u16)b;
         b = comm_rx_byte(RX_TIMEOUT_BYTE); if (b < 0) { link_error(); return 0; }
         m |= (u16)b << 8;
+        san_of_move(m, pendSan);      /* board PRIMA della mossa */
         apply_move_local(m);
-        hist[histN++] = m;
+        hist_push(m, (const char *)pendSan);
     }
     if (histN) {
         h1 = M_FROM(hist[histN - 1]);
@@ -1376,6 +1538,125 @@ static unsigned char do_undo(void) {
 }
 
 /* ================================================================== */
+/* partite famose: replay con l'archivio dell'ESP32                    */
+/* ================================================================== */
+
+/* Sottomenu: 3 pagine da 10; 1-9 e 0 selezionano, SPAZIO pagina avanti,
+ * '.' o RUN-STOP indietro. Ritorna 0..29 o 0xFF se l'utente ripensa. */
+static u8 ask_fame(void)
+{
+    u8 page = 0, sel = 0xFF;
+    int c;
+
+    for (;;) {
+        u8 i, first = (u8)(page * 10), cnt = 10;
+        char label[24];
+        u8 pos;
+
+        scr_clear();
+        scr_puts(0, 0, "PARTITE FAMOSE", COLOR_WHITE);
+        scr_puts(0, 1, "SPAZIO=PAGE  . =INDIETRO", COLOR_WHITE);
+        if (page == 2) cnt = (u8)(FAME_N - 20);
+        for (i = 0; i < cnt; i++) {
+            label[0] = (char)('1' + i);
+            if (i == 9) label[0] = '0';
+            label[1] = ' ';
+            pos = 2;
+            while (fameLabel[first + i][pos - 2]) {
+                label[pos] = fameLabel[first + i][pos - 2];
+                pos++;
+            }
+            label[pos] = 0;
+            scr_puts(0, (u8)(3 + i), label, COLOR_WHITE);
+        }
+
+        c = cgetc();
+        if (c == ' ') { page = (u8)((page + 1) % 3); continue; }
+        if (c == 3 || c == '.') return 0xFF;
+        if (c >= '1' && c <= '9') sel = (u8)(page * 10 + (c - '1'));
+        else if (c == '0') sel = (u8)(page * 10 + 9);
+        if (sel < FAME_N) return sel;
+    }
+}
+
+/* Riproduce la partita idx dell'archivio ESP32, una semimossa ogni ~1 s.
+ * SPAZIO = pausa/riprendi, un altro tasto interrompe (torna al menu).
+ * Ritorna 1 se a fine partita l'utente vuole il menu, 0 se esce. */
+static u8 replay_loop(u8 idx)
+{
+    u16 n, i;
+    int b;
+    u8 stopped = 0;
+
+    histN = 0;
+    new_board_local();
+    h1 = h2 = 0xFF;
+    hasAiMove = 0;
+    checkFlag = 0;
+    drawNote = 0;
+    joyFrom = 0xFF;
+    joyCursor = 0xFF;
+    draw_board();
+    show_history();
+
+    drain_link();
+    if (comm_tx_byte(CMD_FAME_LOAD) != 0 || comm_tx_byte(idx) != 0) {
+        link_error(); return 0;
+    }
+    (void)wait_ack();
+    b = comm_rx_byte(RX_TIMEOUT_BYTE); if (b < 0) { link_error(); return 0; }
+    n = (u16)b;
+    b = comm_rx_byte(RX_TIMEOUT_BYTE); if (b < 0) { link_error(); return 0; }
+    n |= (u16)b << 8;
+
+    for (i = 0; i <= n; i++) {
+        u32 t = (u32)clock() + 60;          /* ~1 s tra le mosse */
+        while ((u32)clock() < t) {
+            if (kbhit()) {
+                int c = cgetc();
+                if (c != ' ') { stopped = 1; break; }
+                c = cgetc();                /* pausa: un altro tasto per riprendere */
+                if (c != ' ') { stopped = 1; break; }
+            }
+        }
+        if (stopped) break;
+
+        if (comm_tx_byte(CMD_FAME_NEXT) != 0) { link_error(); return 0; }
+        b = comm_rx_byte(RX_TIMEOUT_CMD);
+        if (b == RSP_MOVED) {
+            int f = comm_rx_byte(RX_TIMEOUT_BYTE);
+            int mlo = comm_rx_byte(RX_TIMEOUT_BYTE);
+            int mhi = comm_rx_byte(RX_TIMEOUT_BYTE);
+            u16 m;
+            if (f < 0 || mlo < 0 || mhi < 0) { link_error(); return 0; }
+            m = (u16)(mlo | ((u16)mhi << 8));
+            san_of_move(m, pendSan);        /* board PRIMA della mossa */
+            ui_apply_move(m);
+            hist_push(m, (const char *)pendSan);
+            show_history();
+            checkFlag = (u8)(f & F_CHECK);
+            if (checkFlag) {
+                show_status();
+                sfx_check();
+            }
+        } else if (b == RSP_GAME_OVER) {
+            unsigned char reason, winner;
+            if (!read_over_tail(&reason, &winner)) return 0;
+            show_game_over(reason, winner);  /* reason 0 = risultato storico */
+            return (u8)(g_wantNew ? 1 : 0);
+        } else {
+            link_error(); return 0;
+        }
+    }
+    if (stopped) {
+        /* partita interrotta: rimetti il firmware in attesa dei comandi */
+        if (comm_tx_byte(CMD_QUIT) == 0) (void)wait_ack();
+        return 1;                           /* torna al menu principale */
+    }
+    return 1;
+}
+
+/* ================================================================== */
 /* loop di gioco                                                       */
 /* ================================================================== */
 
@@ -1407,6 +1688,7 @@ static u8 game_loop(void) {
             continue;
         }
 
+        san_of_move(m, pendSan);      /* board PRIMA della mossa */
         snap_save();
         ui_apply_move(m);          /* mossa del giocatore visibile subito */
         comm_rx_flush();
@@ -1451,14 +1733,14 @@ static u8 game_loop(void) {
             continue;
         }
         if (rsp == RSP_GAME_OVER) {           /* l'umano ha chiuso la partita */
-            if (histN < 400) hist[histN++] = m;
+            hist_push(m, (const char *)pendSan);
             show_history();
             if (!read_over_tail(&reason, &winner)) return 0;
             show_game_over(reason, winner);
             return (u8)(g_wantNew ? 1 : 0);
         }
         if (rsp == RSP_BEST_MOVE) {           /* partita che prosegue */
-            if (histN < 400) hist[histN++] = m;
+            hist_push(m, (const char *)pendSan);
             rc = recv_best_payload();
             if (rc == 2) {
                 if (!recover_link()) return 0;
@@ -1510,6 +1792,7 @@ static u8 ask_color(void)
 int main(void)
 {
     u8 rc, first;
+    int c;
 
     POKE(0xD020, COLOR_BLACK);               /* bordo */
     POKE(0xD021, COLOR_BLACK);               /* sfondo */
@@ -1551,6 +1834,19 @@ int main(void)
 
         level = ask_level();
         humanColor = ask_color();
+
+        scr_puts(0, 15, "P FAMOSE  INVIO=GIOCA", COLOR_WHITE);
+        c = cgetc();
+        if (c == 'p' || c == 'P') {
+            u8 idx = ask_fame();
+            if (idx != 0xFF) {
+                rc = replay_loop(idx);
+                if (rc == 0) return 0;    /* Q o errore di link */
+                first = 0;                /* fine partita/stop: menu */
+                continue;
+            }
+        }
+
         flip = (humanColor == BLACK) ? 1 : 0;
 
         draw_board();

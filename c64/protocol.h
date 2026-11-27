@@ -13,6 +13,12 @@
 #define CMD_QUIT      0x51   /* 'Q' */
 #define CMD_GET_HIST  0x47   /* 'G' - risponde con lo storico mosse (resync) */
 #define CMD_GO        0x45   /* 'E' - muovi se e' il turno del computer */
+#define CMD_FAME_LOAD 0x46   /* 'F' + 1 byte: indice partita famosa (0..29);
+                             * risponde ACK + n lo + n hi (semimosse) */
+#define CMD_FAME_NEXT 0x50   /* 'P' - applica la prossima semimossa della
+                             * partita famosa: RSP_MOVED + flags + m lo + m hi,
+                             * oppure RSP_GAME_OVER a lista esaurita (reason 0:
+                             * risultato storico, non un matto) */
 
 /* ---- risposte ESP32 -> C64 ---- */
 #define RSP_ILLEGAL   0x00
@@ -20,8 +26,10 @@
 #define RSP_BEST_MOVE 0x02   /* + mossa lo, mossa hi, score lo, score hi, depth, flags */
 #define RSP_GAME_OVER 0x03   /* + reason, winner */
 #define RSP_HIST      0x04   /* + n lo, n hi, poi n mosse (2 byte ciascuna) */
-#define RSP_MOVED     0x05   /* mossa dell'umano accettata: + flags (u8) */
+#define RSP_MOVED     0x05   /* mossa accettata (umano o replay famosa):
+                             * + flags (u8) e, nel replay, + m lo + m hi */
                                /*   flags: F_CHECK | F_DRAW50 | F_DRAWREP */
+#define OVER_LIST_END 0      /* GAME_OVER: lista semimosse esaurita (famose) */
 
 /* ---- reason di GAME_OVER ---- */
 #define OVER_MATE       1

@@ -14,6 +14,7 @@
 
 extern "C" {
 #include "chess.h"
+#include "famous_games.h"
 }
 
 #include "protocol.h"
@@ -370,6 +371,61 @@ static void handleGetHist(void) {
   sendHist();
 }
 
+/* ---- partite famose: replay semimossa per semimossa ---- */
+
+/* Le partite vivono in flash (famous_games.h); l'ESP32 le applica una
+ * semimossa per volta su richiesta del C64, che le disegna con la sua
+ * SAN locale. CMD_FAME_LOAD prepara la partita e comunica quante
+ * semimosse ha; CMD_FAME_NEXT ne applica una. A elenco esaurito si manda
+ * GAME_OVER con reason 0 (fino a esaurimento, non e' un matto: il
+ * risultato e' quello storico in fameResult). */
+static u16 famIdx = 0;
+static u16 famPos = 0;
+
+static void handleFameLoad(void) {
+  int idx = linkReadByte(2000);
+  if (idx < 0 || (u16)idx >= FAME_COUNT) {
+    linkWriteByte(RSP_ILLEGAL);
+    return;
+  }
+  famIdx = (u16)idx;
+  famPos = 0;
+  new_game();
+  gameHistN = 0;
+  linkWriteByte(RSP_ACK);
+  linkWriteByte((uint8_t)(fameLen[famIdx] & 0xFF));
+  linkWriteByte((uint8_t)((fameLen[famIdx] >> 8) & 0xFF));
+}
+
+static void handleFameNext(void) {
+  u16 m;
+  uint8_t flags = 0, over;
+
+  if (famPos >= fameLen[famIdx]) {
+    /* risultato storico della partita (reason 0 = lista esaurita) */
+    linkWriteByte(RSP_GAME_OVER);
+    linkWriteByte(0);
+    linkWriteByte((fameResult[famIdx] == 2) ? WINNER_DRAW
+                  : (fameResult[famIdx] == 0) ? WINNER_WHITE : WINNER_BLACK);
+    return;
+  }
+
+  m = fameMoves[fameOff[famIdx] + famPos++];
+  commit_move(m);
+  recordMove(m);
+
+  if (in_check()) flags |= F_CHECK;   /* chi deve muovere ora e' sotto scacco */
+  over = gameOverReason();
+  if (over) flags |= F_GAMEOVER;
+
+  linkWriteByte(RSP_MOVED);
+  linkWriteByte(flags);
+  linkWriteByte((uint8_t)(m & 0xFF));
+  linkWriteByte((uint8_t)((m >> 8) & 0xFF));
+
+  if (over) sendGameOver(over);       /* mai in pratica, se il PGN e' valido */
+}
+
 /* Se e' il turno del computer muove (dopo un resync o all'avvio da UI);
  * altrimenti conferma soltanto. */
 static void handleGo(void) {
@@ -391,6 +447,8 @@ static void dispatch(uint8_t cmd) {
     case CMD_QUIT:      handleQuit();     break;
     case CMD_GET_HIST:  handleGetHist();  break;
     case CMD_GO:        handleGo();       break;
+    case CMD_FAME_LOAD: handleFameLoad(); break;
+    case CMD_FAME_NEXT: handleFameNext(); break;
     default: break;                       /* comando ignoto: ignora */
   }
 }
