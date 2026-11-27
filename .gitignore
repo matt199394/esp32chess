@@ -10,6 +10,9 @@ esp32/build/
 *.bin
 *.elf
 
+# binari di riferimento tenuti SOLO in locale (non nel repo)
+/dongambit.prg
+
 # editor / OS
 *~
 .DS_Store

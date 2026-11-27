@@ -97,7 +97,7 @@ extern s8  epSq;          /* -1 oppure casa 0x88 */
 extern u8  halfmove;      /* semimosse dall'ultima irrversibile */
 extern u8  kingSq[2];
 extern u16 posKey;
-extern u8  gamePly;       /* indice in keyHist della posizione corrente */
+extern u16 gamePly;       /* indice in keyHist della posizione corrente */
 extern u16 keyHist[MAXKEYS];
 extern u32 nodes;         /* nodi visitati dall'ultima think() */
 extern u8  quiesceMax;    /* profondita' massima della quiescenza (0 = off) */
@@ -121,6 +121,7 @@ void commit_move(u16 m);                  /* push_move + avanza la partita */
 u8   legal_moves(u16 *list);
 u8   has_legal_moves(void);
 u8   in_check(void);
+u8   in_check_of(u8 c);   /* il re del colore c e' sotto scacco */
 
 s16  evaluate(void);                      /* dal punto di vista di chi muove */
 u16  think(u8 maxDepth, u32 maxNodes, s16 *score);

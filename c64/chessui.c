@@ -1,18 +1,39 @@
 /*
- * chessui.c - UI C64 "stupida" per esp32chess (bozza).
+ * chessui.c - UI C64 per esp32chess: scacchiera 3x3 caratteri per casa
+ * (charset custom hires in banca VIC 2, forme dei pezzi "Don's Gambit":
+ * neri solidi, bianchi a contorno), effetti sonori SID,
+ * joystick e due timer (giocatore e AI). La mossa del giocatore viene
+ * mostrata subito sulla scacchiera, prima ancora che l'ESP32 risponda.
+ * Cronologia in notazione algebrica internazionale (SAN, calcolata sul
+ * C64), undo con 'u', replay delle partite famose archiviate sull'ESP32
+ * e finali giocabili (menu principale a tre voci).
  *
- * Il C64 NON genera mosse ne' valuta: mantiene solo una copia della posizione
- * per il display e per il cursore, manda le mosse all'ESP32 e ne riceve la
- * risposta. La legalita' e' decisa dall'ESP32.
+ * Il C64 NON genera mosse ne' valuta: mantiene solo una copia della
+ * posizione per il display (lboard); la legalita' la decide sempre l'ESP32.
  *
- * Bozza: board testuale con conio. Da sostituire con la UI grafica 3x3-charset
- * di CHESS 2026 (~/lavoro/chess2026/src/main_c64.c).
+ * Schermo a $8400, charset a $8800 (banca VIC 2): il BSS deve restare
+ * sotto $8400 (controllare la map del linker dopo modifiche grosse).
  */
 
 #include <conio.h>
+#include <c64.h>
+#include <peekpoke.h>
+#include <stdlib.h>
 #include <string.h>
+#include <time.h>
+
 #include "protocol.h"
 #include "comm.h"
+#include "font_writer.h"
+#include "endgames.h"
+
+/* ---- tipi (cc65: int = 16 bit) ---- */
+typedef unsigned char  u8;
+typedef signed char    s8;
+typedef unsigned int   u16;
+typedef signed int     s16;
+typedef unsigned long  u32;
+typedef signed long    s32;
 
 /* ---- tipi pezzo (condivisi con il motore) ---- */
 #define EMPTY  0
@@ -29,397 +50,1989 @@
 #define PC(p) ((unsigned char)((p) >> 3))
 #define MAKE_PIECE(t,c) ((unsigned char)((t) | ((c) << 3)))
 
+/* timeout di ricezione (ms): la risposta a un comando puo' arrivare dopo il
+ * think del motore (fino a 6s su EXPERT), i byte successivi arrivano a
+ * raffica. Su timeout comm_rx_byte svuota il buffer e ritorna -1. */
+#define RX_TIMEOUT_CMD   10000u
+#define RX_TIMEOUT_BYTE   2000u
+
+/* jiffy (1/60 s) per millisecondi, approssimato */
+#define MS_TO_JFY(ms) ((u32)(ms) / 17UL)
+
 /* ---- codifica mossa (identica al motore) ---- */
-#define MK_MOVE(f,t,pr) ((unsigned int)((f) | ((t) << 7) | ((pr) << 14)))
-#define M_FROM(m) ((unsigned char)((m) & 0x7F))
-#define M_TO(m)   ((unsigned char)(((m) >> 7) & 0x7F))
-#define M_PROMO(m) ((unsigned char)(((m) >> 14) & 3))
-#define MOVE_NONE ((unsigned int)0xFFFF)
+#define MK_MOVE(f,t,pr) ((u16)((f) | ((t) << 7) | ((pr) << 14)))
+#define M_FROM(m) ((u8)((m) & 0x7F))
+#define M_TO(m)   ((u8)(((m) >> 7) & 0x7F))
+#define M_PROMO(m) ((u8)(((m) >> 14) & 3))
+#define MOVE_NONE ((u16)0xFFFF)
+#define MOVE_UNDO ((u16)0xFFFE)     /* richiede from 0x7E/to 0x7F: irraggiungibile */
 
 static const unsigned char promoType[4] = { KNIGHT, BISHOP, ROOK, QUEEN };
 
+/* ---- layout: schermo in banca VIC 2, scacchiera 3x3 caratteri per casa ---- */
+#define SCR_BASE   0x8400
+#define COL_BASE   0xD800
+#define CHR_BASE   0x8800
+
+#define BOARD_X    14
+#define BOARD_Y    1
+#define FILE_ROW   0
+#define RANK_COL_R 38
+
+#define MOVE_ROW   2
+#define VAL_ROW    5
+#define DEPTH_ROW  6
+#define CHECK_ROW  8
+#define TIME_YOU_ROW 10
+#define TIME_AI_ROW  11
+#define HIST_HEAD    12
+#define HIST_ROW     13
+#define HIST_ROWS    7
+#define PROMPT_ROW 20
+#define MSG_ROW    21
+#define OVER_ROW   22
+#define OVER_WHO_ROW 23
+#define OVER_KEY_ROW 24
+#define PANEL_W    13
+
+#define COL_TITLE  COLOR_YELLOW      /* titoli */
+#define COL_KEY    COLOR_LIGHTGREEN  /* tasti 1/2/3 */
+#define COL_HINT   COLOR_GRAY2       /* righe di aiuto, versione */
+
+#define KB_COL     7                 /* prima colonna del testo digitato */
+
+#define FAME_PER_PAGE 10
+#define LIST_STEP     2              /* righe tra una voce e l'altra */
+
 /* ---- stato locale (solo display) ---- */
-static unsigned char lboard[128];
-static unsigned char lside;
-static signed char   lep;               /* casa en passant (per il display) */
+static u8 lboard[128];
+static u8 lside;
+static s8 lep;                      /* casa en passant (per il display) */
 
-/* ---- storico locale per UNDO ---- */
-static unsigned int  hist[400];
-static unsigned int  histN;
+static u16 hist[400];
+static u16 histN;
+static u8 histSan[400][8];          /* SAN di ogni semimossa (per show_history) */
+static u8 pendSan[8];               /* SAN della mossa in attesa di conferma */
 
-static unsigned char humanColor;
-static unsigned char level;
+/* partite famose: mantieni allineato con FAME_COUNT in esp32/famous_games.h
+ * (le etichette sono solo per il menu C64; le mosse stanno sull'ESP32;
+ * il numero di tasto lo aggiunge ask_fame) */
+#define FAME_N 30
+static const char * const fameLabel[FAME_N] = {
+    "ANDERSSEN-KIESERITZKY 1851",
+    "ANDERSSEN-DUFRESNE 1852",
+    "MORPHY-BRUNSWICK 1858",
+    "STEINITZ-BARDELEBEN 1895",
+    "LASKER-BAUER 1889",
+    "ROTLEWI-RUBINSTEIN 1907",
+    "MARSHALL-LEVITSKY 1912",
+    "LASKER-CAPABLANCA 1914",
+    "ALEKHINE-NIMZOWITSCH 1930",
+    "BYRNE-FISCHER 1956",
+    "SPASSKY-BRONSTEIN 1960",
+    "TAL-LARSEN 1965",
+    "FISCHER-SPASSKY 1972 G6",
+    "KARPOV-KASPAROV 1985 G16",
+    "KASPAROV-KARPOV 1985 G24",
+    "KASPAROV-ANAND 1995 G10",
+    "IVANCHUK-YUSUPOV 1991",
+    "SHORT-TIMMAN 1991",
+    "BELIAVSKY-NUNN 1985",
+    "POLUGAEVSKY-NEZHMETDINOV 1958",
+    "KASPAROV-TOPALOV 1999",
+    "DEEP BLUE-KASPAROV 1997 G6",
+    "KARPOV-KASPAROV 1985 G22",
+    "KASPAROV-KRAMNIK 2000 G2",
+    "ARONIAN-ANAND 2013",
+    "CARLSEN-KARJAKIN 2016 G10",
+    "CARLSEN-CARUANA 2018 TB1",
+    "DING-NEPOMNIACHTCHI 2023 G6",
+    "CARLSEN-ANAND 2013 G5",
+    "KASPAROV-TOPALOV 1999 II",
+};
+#define FAME_PAGES ((FAME_N + FAME_PER_PAGE - 1) / FAME_PER_PAGE)
+
+/* finali in corso: indice (0xFF = partita normale). Serve a undo e resync:
+ * la board locale va ricostruita dalla posizione del finale, non da quella
+ * di partenza. Allineato con endActive sull'ESP32. */
+static u8 endActive = 0xFF;
+
+static u8 humanColor;
+static u8 level;
+static u8 flip;                     /* 1 = scacchiera ruotata (umano nero) */
+
+/* ultima mossa (0xFF = nessuna) e cursore joystick */
+static u8 h1, h2;
+static u8 joyCursor;                /* casa 0x88 del cursore */
+static u8 joyFrom;                  /* casa selezionata (0xFF = nessuna) */
+
+static char aiMove[8];              /* ultima mossa del computer (e2-e4) */
+static u8 hasAiMove;                /* 1 = c'e' una mossa del computer da mostrare */
+static s16 aiScore;
+static u8 aiDepth;
+static u8 checkFlag;                /* 0 = nessuno, 1 = sei sotto scacco,
+                                       2 = la tua mossa ha dato scacco */
+static u8 drawNote;                 /* 0 = nessuna, 1 = 50 mosse,
+                                       2 = posizione ripetuta (reclamabili) */
+static u8 emptyBoard;               /* 1 = scacchiera senza pezzi (menu) */
+static u8 g_wantNew;                /* scelta dell'utente a fine partita */
+
+/* timer (jiffy): segmento aperto = l'orologio corre per quel lato */
+#define SEG_PLAYER 0
+#define SEG_AI     1
+static u32 plBase, aiBase;          /* jiffy accumulati nei segmenti chiusi */
+static u32 segT0;                   /* clock() di apertura del segmento */
+static u8  segWho;                  /* SEG_PLAYER o SEG_AI */
+
+/* snapshot per la mossa del giocatore: visibile subito, ripristinata
+ * se l'ESP32 la dichiara illegale */
+static u8 snapBoard[128];
+static s8 snapLep;
+static u8 snapSide, snapH1, snapH2;
+
+/* ================================================================== */
+/* glyph dei pezzi "Don's Gambit" (estratti da dongambit.png, 24x24):  */
+/* charset HIRES, 3x3 caratteri per casa = 9 glyph per pezzo.          */
+/* bit 0 = pezzo ($D021 nero), bit 1 = casa (color RAM). I neri sono   */
+/* riempimenti solidi esatti, i bianchi il contorno del pezzo (in hires*/
+/* il bianco pieno su casa colorata non e' rappresentabile).           */
+/* ordine: [colore][tipo][cella cr*3+cc][8 byte], byte gia' decodificati */
+/* ================================================================== */
+
+static const u8 glyph_hi[2][6][9][8] = {
+    /* neri (solidi) */ {
+        /* pawn */
+        {
+            { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF },
+            { 0xFF, 0xFF, 0xFF, 0xFF, 0xC3, 0x81, 0x00, 0x00 },
+            { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF },
+            { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF },
+            { 0x00, 0x81, 0x00, 0x81, 0xC3, 0xC3, 0x81, 0x00 },
+            { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF },
+            { 0xFE, 0xFC, 0xFC, 0xFF, 0xF8, 0xF8, 0xFF, 0xFF },
+            { 0x00, 0x00, 0x00, 0xFF, 0x00, 0x00, 0xFF, 0xFF },
+            { 0x7F, 0x3F, 0x3F, 0xFF, 0x1F, 0x1F, 0xFF, 0xFF },
+        },
+        /* knight */
+        {
+            { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE, 0xFC, 0xF8 },
+            { 0xFF, 0xFF, 0xD7, 0x83, 0x00, 0x20, 0x00, 0x00 },
+            { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F, 0x3F, 0x1F },
+            { 0xF0, 0xE0, 0xE0, 0xF1, 0xFF, 0xFF, 0xFE, 0xFC },
+            { 0x00, 0x00, 0x00, 0x80, 0x80, 0x00, 0x00, 0x00 },
+            { 0x8F, 0x4F, 0x27, 0x27, 0x17, 0x13, 0x0B, 0x0B },
+            { 0xFC, 0xFE, 0xFE, 0xFF, 0xF8, 0xF8, 0xFF, 0xFF },
+            { 0x00, 0x00, 0x00, 0xFF, 0x00, 0x00, 0xFF, 0xFF },
+            { 0x03, 0x07, 0x07, 0xFF, 0x07, 0x07, 0xFF, 0xFF },
+        },
+        /* bishop */
+        {
+            { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF },
+            { 0xFF, 0xFF, 0xE7, 0xC3, 0xE7, 0xC3, 0x81, 0x08 },
+            { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF },
+            { 0xFF, 0xFE, 0xFE, 0xFE, 0xFF, 0xFF, 0xFF, 0xFF },
+            { 0x10, 0x20, 0x00, 0x00, 0x00, 0x81, 0x00, 0x81 },
+            { 0xFF, 0x7F, 0x7F, 0x7F, 0xFF, 0xFF, 0xFF, 0xFF },
+            { 0xFF, 0xFF, 0xFE, 0xFF, 0xF8, 0xF8, 0xFF, 0xFF },
+            { 0x81, 0x00, 0x00, 0xFF, 0x00, 0x00, 0xFF, 0xFF },
+            { 0xFF, 0xFF, 0x7F, 0xFF, 0x1F, 0x1F, 0xFF, 0xFF },
+        },
+        /* rook */
+        {
+            { 0xFF, 0xFF, 0xFF, 0xF8, 0xF8, 0xF8, 0xF8, 0xFC },
+            { 0xFF, 0xFF, 0xFF, 0xC3, 0xC3, 0x00, 0x00, 0x00 },
+            { 0xFF, 0xFF, 0xFF, 0x1F, 0x1F, 0x1F, 0x1F, 0x3F },
+            { 0xFF, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE },
+            { 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },
+            { 0xFF, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F },
+            { 0xFF, 0xFC, 0xF8, 0xFF, 0xF0, 0xF0, 0xFF, 0xFF },
+            { 0xFF, 0x00, 0x00, 0xFF, 0x00, 0x00, 0xFF, 0xFF },
+            { 0xFF, 0x3F, 0x1F, 0xFF, 0x0F, 0x0F, 0xFF, 0xFF },
+        },
+        /* queen */
+        {
+            { 0xFF, 0xE7, 0xE7, 0xF6, 0xF2, 0xF2, 0xF8, 0xF8 },
+            { 0xFF, 0xE7, 0xE7, 0x66, 0x66, 0x24, 0x24, 0x00 },
+            { 0xFF, 0xE7, 0xE7, 0x6F, 0x4F, 0x4F, 0x1F, 0x1F },
+            { 0xF8, 0xFC, 0xFF, 0xFE, 0xFF, 0xFF, 0xFF, 0xFE },
+            { 0x00, 0x00, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00 },
+            { 0x1F, 0x3F, 0xFF, 0x7F, 0xFF, 0xFF, 0xFF, 0x7F },
+            { 0xFE, 0xFC, 0xF8, 0xFF, 0xF0, 0xF0, 0xFF, 0xFF },
+            { 0x00, 0x00, 0x00, 0xFF, 0x00, 0x00, 0xFF, 0xFF },
+            { 0x7F, 0x3F, 0x1F, 0xFF, 0x0F, 0x0F, 0xFF, 0xFF },
+        },
+        /* king */
+        {
+            { 0xFF, 0xFF, 0xFF, 0xFF, 0xF0, 0xE0, 0xE0, 0xE0 },
+            { 0xE7, 0x81, 0xE7, 0xE7, 0xE7, 0x42, 0x00, 0x00 },
+            { 0xFF, 0xFF, 0xFF, 0xFF, 0x0F, 0x07, 0x07, 0x07 },
+            { 0xE0, 0xF0, 0xF8, 0xFF, 0xFE, 0xFF, 0xFF, 0xFF },
+            { 0x00, 0x00, 0x00, 0xFF, 0x00, 0x00, 0x00, 0x00 },
+            { 0x07, 0x0F, 0x1F, 0xFF, 0x7F, 0xFF, 0xFF, 0xFF },
+            { 0xFE, 0xFC, 0xF8, 0xFF, 0xF0, 0xF0, 0xFF, 0xFF },
+            { 0x00, 0x00, 0x00, 0xFF, 0x00, 0x00, 0xFF, 0xFF },
+            { 0x7F, 0x3F, 0x1F, 0xFF, 0x0F, 0x0F, 0xFF, 0xFF },
+        },
+    },
+    /* bianchi (contorno) */ {
+        /* pawn */
+        {
+            { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF },
+            { 0xFF, 0xFF, 0xFF, 0xFF, 0xC3, 0xBD, 0x7E, 0x7E },
+            { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF },
+            { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF },
+            { 0x7E, 0xBD, 0x7E, 0xBD, 0xDB, 0xDB, 0xBD, 0x7E },
+            { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF },
+            { 0xFE, 0xFD, 0xFC, 0xFF, 0xF8, 0xF8, 0xFF, 0xFF },
+            { 0xFF, 0xFF, 0x00, 0xFF, 0x00, 0x00, 0xFF, 0xFF },
+            { 0x7F, 0xBF, 0x3F, 0xFF, 0x1F, 0x1F, 0xFF, 0xFF },
+        },
+        /* knight */
+        {
+            { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE, 0xFD, 0xFB },
+            { 0xFF, 0xFF, 0xD7, 0xAB, 0x5C, 0xAF, 0xDF, 0xFF },
+            { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F, 0xBF, 0x5F },
+            { 0xF7, 0xEF, 0xEE, 0xF1, 0xFF, 0xFF, 0xFE, 0xFD },
+            { 0xFE, 0xFF, 0x7F, 0xBF, 0xBF, 0x7F, 0xFF, 0xFF },
+            { 0xAF, 0x4F, 0xA7, 0xA7, 0xD7, 0xD3, 0xEB, 0xEB },
+            { 0xFD, 0xFE, 0xFE, 0xFF, 0xF8, 0xF8, 0xFF, 0xFF },
+            { 0xFF, 0xFF, 0x00, 0xFF, 0x00, 0x00, 0xFF, 0xFF },
+            { 0xF3, 0xF7, 0x07, 0xFF, 0x07, 0x07, 0xFF, 0xFF },
+        },
+        /* bishop */
+        {
+            { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF },
+            { 0xFF, 0xFF, 0xE7, 0xDB, 0xE7, 0xDB, 0xB5, 0x6A },
+            { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF },
+            { 0xFF, 0xFE, 0xFE, 0xFE, 0xFF, 0xFF, 0xFF, 0xFF },
+            { 0x56, 0xAF, 0xDF, 0xFF, 0x7E, 0xBD, 0x7E, 0xBD },
+            { 0xFF, 0x7F, 0x7F, 0x7F, 0xFF, 0xFF, 0xFF, 0xFF },
+            { 0xFF, 0xFF, 0xFE, 0xFF, 0xF8, 0xF8, 0xFF, 0xFF },
+            { 0xBD, 0x7E, 0x00, 0xFF, 0x00, 0x00, 0xFF, 0xFF },
+            { 0xFF, 0xFF, 0x7F, 0xFF, 0x1F, 0x1F, 0xFF, 0xFF },
+        },
+        /* rook */
+        {
+            { 0xFF, 0xFF, 0xFF, 0xF8, 0xFA, 0xFB, 0xFB, 0xFC },
+            { 0xFF, 0xFF, 0xFF, 0xC3, 0xDB, 0x3C, 0xFF, 0x00 },
+            { 0xFF, 0xFF, 0xFF, 0x1F, 0x5F, 0xDF, 0xDF, 0x3F },
+            { 0xFF, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE },
+            { 0xFF, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00 },
+            { 0xFF, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F },
+            { 0xFF, 0xFC, 0xF8, 0xFF, 0xF0, 0xF0, 0xFF, 0xFF },
+            { 0xFF, 0x00, 0x00, 0xFF, 0x00, 0x00, 0xFF, 0xFF },
+            { 0xFF, 0x3F, 0x1F, 0xFF, 0x0F, 0x0F, 0xFF, 0xFF },
+        },
+        /* queen */
+        {
+            { 0xFF, 0xE7, 0xE7, 0xF6, 0xF2, 0xF2, 0xF9, 0xFB },
+            { 0xFF, 0xE7, 0xE7, 0x66, 0x66, 0xA5, 0xA5, 0xDB },
+            { 0xFF, 0xE7, 0xE7, 0x6F, 0x4F, 0x4F, 0x9F, 0xDF },
+            { 0xFB, 0xFC, 0xFF, 0xFE, 0xFF, 0xFF, 0xFF, 0xFE },
+            { 0xFF, 0x00, 0xFF, 0x00, 0x7E, 0x7E, 0x7E, 0xFF },
+            { 0xDF, 0x3F, 0xFF, 0x7F, 0xFF, 0xFF, 0xFF, 0x7F },
+            { 0xFE, 0xFD, 0xF8, 0xFF, 0xF0, 0xF0, 0xFF, 0xFF },
+            { 0xFF, 0xFF, 0x00, 0xFF, 0x00, 0x00, 0xFF, 0xFF },
+            { 0x7F, 0xBF, 0x1F, 0xFF, 0x0F, 0x0F, 0xFF, 0xFF },
+        },
+        /* king */
+        {
+            { 0xFF, 0xFF, 0xFF, 0xFF, 0xF0, 0xEF, 0xEF, 0xEF },
+            { 0xE7, 0x99, 0xE7, 0xE7, 0xE7, 0x5A, 0xBD, 0xFF },
+            { 0xFF, 0xFF, 0xFF, 0xFF, 0x0F, 0xF7, 0xF7, 0xF7 },
+            { 0xEF, 0xF7, 0xF8, 0xFF, 0xFE, 0xFF, 0xFF, 0xFF },
+            { 0xFF, 0xFF, 0x00, 0xFF, 0x00, 0x7E, 0x7E, 0x7E },
+            { 0xF7, 0xEF, 0x1F, 0xFF, 0x7F, 0xFF, 0xFF, 0xFF },
+            { 0xFE, 0xFD, 0xF8, 0xFF, 0xF0, 0xF0, 0xFF, 0xFF },
+            { 0xFF, 0xFF, 0x00, 0xFF, 0x00, 0x00, 0xFF, 0xFF },
+            { 0x7F, 0xBF, 0x1F, 0xFF, 0x0F, 0x0F, 0xFF, 0xFF },
+        },
+    },
+};
+
+/* ================================================================== */
+/* output testi (POKE diretto: conio scrive sempre a $0400)            */
+/* ================================================================== */
+
+static u8 to_screen(char c)
+{
+    if (c >= 'A' && c <= 'Z') return (u8)(c - 'A' + 1);
+    if (c >= 'a' && c <= 'z') return (u8)(c - 'a' + 1);
+    if (c >= '0' && c <= '9') return (u8)(c - '0' + 0x30);
+    switch (c) {
+        case ' ': return 0x20;
+        case ':': return 0x3A;
+        case '-': return 0x2D;
+        case '.': return 0x2E;
+        case ',': return 0x2C;
+        case '/': return 0x2F;
+        case '=': return 0x1F;
+        case '!': return 0x21;
+        case '(': return 0x28;
+        case ')': return 0x29;
+        case '?': return 0x3F;
+        default:  return 0x20;
+    }
+}
+
+static void scr_put(u8 x, u8 y, u8 code, u8 color)
+{
+    u16 o = (u16)(y * 40 + x);
+    POKE((u16)(SCR_BASE + o), code);
+    POKE((u16)(COL_BASE + o), color);
+}
+
+static void scr_puts(u8 x, u8 y, const char *s, u8 color)
+{
+    while (*s) {
+        scr_put(x, y, to_screen(*s), color);
+        x++;
+        s++;
+    }
+}
+
+static void scr_unum(u8 x, u8 y, unsigned int v, u8 color)
+{
+    char b[8];
+    utoa(v, b, 10);
+    scr_puts(x, y, b, color);
+}
+
+static void scr_snum(u8 x, u8 y, s16 v, u8 color)
+{
+    char b[8];
+    itoa(v, b, 10);
+    scr_puts(x, y, b, color);
+}
+
+static void scr_blank(u8 x, u8 y, u8 n, u8 color)
+{
+    while (n--) scr_put(x++, y, 0x20, color);
+}
+
+static void scr_clear(void)
+{
+    u16 i;
+    for (i = 0; i < 1000; i++) {
+        POKE((u16)(SCR_BASE + i), 0x20);
+        POKE((u16)(COL_BASE + i), COLOR_WHITE);
+    }
+}
+
+/* voce "tasto testo": il testo viene troncato a maxx, quindi non puo'
+ * mai finire sulla scacchiera (pannello) o a capo (schermo intero) */
+static void put_item(u8 y, char key, const char *txt, u8 color, u8 maxx)
+{
+    u8 x = 2;
+    scr_put(0, y, to_screen(key), COL_KEY);
+    while (*txt && x < maxx) {
+        scr_put(x, y, to_screen(*txt), color);
+        x++;
+        txt++;
+    }
+}
+#define menu_item(y,k,t,c) put_item((y),(k),(t),(c),PANEL_W)
+#define list_item(y,k,t)   put_item((y),(k),(t),COLOR_WHITE,40)
+
+/* svuota il pannello sinistro sotto il titolo: niente residui */
+static void menu_clear(void)
+{
+    u8 y;
+    for (y = 2; y <= 24; y++) scr_blank(0, y, PANEL_W, COLOR_BLACK);
+}
+
+/* schermata a tutto schermo: titolo, filetto, riga di aiuto in fondo */
+static void list_header(const char *title, const char *footer)
+{
+    u8 x;
+    scr_clear();
+    scr_puts(0, 0, title, COL_TITLE);
+    for (x = 0; x < 40; x++) scr_put(x, 1, to_screen('-'), COL_HINT);
+    scr_puts(0, 24, footer, COL_HINT);
+}
+
+/* ------------------------------------------------------------------ */
+/* effetti sonori SID (voce 1): note musicali con envelope, non       */
+/* semplici tonfi: l'onda quadra a frequenza bassissima del primo     */
+/* draft era in pratica una serie di click.                           */
+/* ------------------------------------------------------------------ */
+
+static void sid_wait(u8 j)
+{
+    u32 t = (u32)clock() + j;
+    while ((u32)clock() < t) {}
+}
+
+/* nota singola: f = frequency word, wave = forma d'onda SENZA il bit di
+   gate (0x01), jfy = jiffy di gate. Sustain pieno e release breve: suono
+   pieno che sfuma invece di troncarsi di netto. */
+static void sid_note(u16 f, u8 wave, u8 jfy)
+{
+    POKE(0xD418, 0x0F);            /* volume massimo */
+    POKE(0xD405, 0x00);            /* attacco immediato */
+    POKE(0xD406, 0xF3);            /* sustain 15, release breve */
+    POKE(0xD402, 0x00);            /* pulse width 50% (solo onda impulso) */
+    POKE(0xD403, 0x08);
+    POKE(0xD400, (u8)(f & 0xFF));
+    POKE(0xD401, (u8)(f >> 8));
+    POKE(0xD404, (u8)(wave | 0x01));  /* gate on */
+    sid_wait(jfy);
+    POKE(0xD404, wave);            /* gate off */
+}
+
+/* "tock" di mossa: tick alto; sulle catture un tonfo piu' grave */
+static void sfx_move(u8 capture)
+{
+    if (capture) {
+        sid_note(0x218A, 0x10, 8);     /* triangle C5 */
+        sid_note(0x0862, 0x10, 10);    /* triangle C3: tonfo */
+    } else {
+        sid_note(0x4313, 0x10, 6);     /* triangle C6: tick */
+    }
+}
+
+/* errore: due tonfi gravi in onda quadra */
+static void sfx_error(void)
+{
+    sid_note(0x070D, 0x40, 7);
+    sid_wait(2);
+    sid_note(0x070D, 0x40, 7);
+}
+
+/* scacco: doppio beep acuto */
+static void sfx_check(void)
+{
+    sid_note(0x2A41, 0x40, 5);
+    sid_wait(2);
+    sid_note(0x2A41, 0x40, 5);
+}
+
+/* fine partita: tre note discendenti */
+static void sfx_gameover(void)
+{
+    sid_note(0x218A, 0x10, 10);
+    sid_note(0x1920, 0x10, 10);
+    sid_note(0x10C5, 0x10, 14);
+}
+
+/* ================================================================== */
+/* charset custom                                                     */
+/* ================================================================== */
+
+static void install_charset(void)
+{
+    u8 t, cell, i, c;
+    u16 j;
+
+    for (j = 0; j < 2048; j++)
+        POKE((u16)(CHR_BASE + j), 0x00);
+
+    /* font testo: solo i glyph 0x00-0x3F (A-Z, cifre, punteggiatura) */
+    for (j = 0; j < 512; j++)
+        POKE((u16)(CHR_BASE + j), font_writer[j]);
+
+    /* blocco solido al glyph 0xE0: case vuote (tutti i bit a 1 =
+     * colore casa dal color RAM) */
+    for (j = 0; j < 8; j++)
+        POKE((u16)(CHR_BASE + 0xE0 * 8 + j), 0xFF);
+
+    /* pezzi Don's Gambit: glyph hires da 0x40 (neri solidi) e 0x76
+     * (bianchi contorno), 9 caratteri per pezzo, byte gia' decodificati */
+    for (c = 0; c < 2; c++) {
+        for (t = 0; t < 6; t++) {
+            for (cell = 0; cell < 9; cell++) {
+                u16 a = (u16)(CHR_BASE + (64 + c * 54 + t * 9 + cell) * 8);
+                for (i = 0; i < 8; i++)
+                    POKE((u16)(a + i), glyph_hi[c][t][cell][i]);
+            }
+        }
+    }
+}
 
 /* ================================================================== */
 /* board locale                                                        */
 /* ================================================================== */
 
 static void new_board_local(void) {
-  unsigned char i;
-  memset(lboard, 0, sizeof(lboard));
-  lboard[0]  = MAKE_PIECE(ROOK, WHITE);
-  lboard[1]  = MAKE_PIECE(KNIGHT, WHITE);
-  lboard[2]  = MAKE_PIECE(BISHOP, WHITE);
-  lboard[3]  = MAKE_PIECE(QUEEN, WHITE);
-  lboard[4]  = MAKE_PIECE(KING, WHITE);
-  lboard[5]  = MAKE_PIECE(BISHOP, WHITE);
-  lboard[6]  = MAKE_PIECE(KNIGHT, WHITE);
-  lboard[7]  = MAKE_PIECE(ROOK, WHITE);
-  lboard[112] = MAKE_PIECE(ROOK, BLACK);
-  lboard[113] = MAKE_PIECE(KNIGHT, BLACK);
-  lboard[114] = MAKE_PIECE(BISHOP, BLACK);
-  lboard[115] = MAKE_PIECE(QUEEN, BLACK);
-  lboard[116] = MAKE_PIECE(KING, BLACK);
-  lboard[117] = MAKE_PIECE(BISHOP, BLACK);
-  lboard[118] = MAKE_PIECE(KNIGHT, BLACK);
-  lboard[119] = MAKE_PIECE(ROOK, BLACK);
-  for (i = 0; i < 8; i++) {
-    lboard[16 + i]  = MAKE_PIECE(PAWN, WHITE);
-    lboard[96 + i]  = MAKE_PIECE(PAWN, BLACK);
-  }
-  lside = WHITE;
-  lep = -1;
+    u8 i;
+    memset(lboard, 0, sizeof(lboard));
+    lboard[0]  = MAKE_PIECE(ROOK, WHITE);
+    lboard[1]  = MAKE_PIECE(KNIGHT, WHITE);
+    lboard[2]  = MAKE_PIECE(BISHOP, WHITE);
+    lboard[3]  = MAKE_PIECE(QUEEN, WHITE);
+    lboard[4]  = MAKE_PIECE(KING, WHITE);
+    lboard[5]  = MAKE_PIECE(BISHOP, WHITE);
+    lboard[6]  = MAKE_PIECE(KNIGHT, WHITE);
+    lboard[7]  = MAKE_PIECE(ROOK, WHITE);
+    lboard[112] = MAKE_PIECE(ROOK, BLACK);
+    lboard[113] = MAKE_PIECE(KNIGHT, BLACK);
+    lboard[114] = MAKE_PIECE(BISHOP, BLACK);
+    lboard[115] = MAKE_PIECE(QUEEN, BLACK);
+    lboard[116] = MAKE_PIECE(KING, BLACK);
+    lboard[117] = MAKE_PIECE(BISHOP, BLACK);
+    lboard[118] = MAKE_PIECE(KNIGHT, BLACK);
+    lboard[119] = MAKE_PIECE(ROOK, BLACK);
+    for (i = 0; i < 8; i++) {
+        lboard[16 + i] = MAKE_PIECE(PAWN, WHITE);
+        lboard[96 + i] = MAKE_PIECE(PAWN, BLACK);
+    }
+    lside = WHITE;
+    lep = -1;
+}
+
+/* board locale dalla posizione iniziale del finale idx (dati generati,
+ * a8..h1): la struttura e' la stessa di new_board_local */
+static void end_load_local(u8 idx) {
+    u8 i;
+
+    memset(lboard, 0, sizeof(lboard));
+    for (i = 0; i < 64; i++) {
+        u8 p = endBoard[idx][i];
+        if (p) lboard[(u8)(((7 - (i >> 3)) << 4) | (i & 7))] = p;
+    }
+    lside = endSide[idx];
+    lep = -1;
 }
 
 /* Applica una mossa alla copia locale (solo per il display: gestisce cattura,
  * promozione, arrocco ed en passant ma non verifica la legalita'). */
-static void apply_move_local(unsigned int m) {
-  unsigned char from  = M_FROM(m);
-  unsigned char to    = M_TO(m);
-  unsigned char promo = M_PROMO(m);
-  unsigned char p     = lboard[from];
-  unsigned char pt    = PT(p);
-  unsigned char pc    = PC(p);
+static void apply_move_local(u16 m) {
+    u8 from  = M_FROM(m);
+    u8 to    = M_TO(m);
+    u8 promo = M_PROMO(m);
+    u8 p     = lboard[from];
+    u8 pt    = PT(p);
+    u8 pc    = PC(p);
 
-  lboard[to]   = p;
-  lboard[from] = EMPTY;
+    lboard[to]   = p;
+    lboard[from] = EMPTY;
 
-  /* promozione */
-  if (pt == PAWN && (to < 16 || to >= 112))
-    lboard[to] = MAKE_PIECE(promoType[promo], pc);
+    if (pt == PAWN && (to < 16 || to >= 112))
+        lboard[to] = MAKE_PIECE(promoType[promo], pc);
 
-  /* en passant: rimuove il pedone catturato dietro la casa d'arrivo */
-  if (pt == PAWN && to == (unsigned char)lep)
-    lboard[(unsigned char)(to + (pc == WHITE ? -16 : 16))] = EMPTY;
-  lep = -1;
+    if (pt == PAWN && to == (u8)lep)
+        lboard[(u8)(to + (pc == WHITE ? -16 : 16))] = EMPTY;
+    lep = -1;
 
-  /* doppia spinta di pedone: registra la casa en passant */
-  if (pt == PAWN && (from - to == 32 || to - from == 32))
-    lep = (signed char)((from + to) >> 1);
+    if (pt == PAWN && (from - to == 32 || to - from == 32))
+        lep = (s8)((from + to) >> 1);
 
-  /* arrocco: sposta la torre */
-  if (pt == KING && (to - from == 2 || from - to == 2)) {
-    if (to > from) {                              /* lato re */
-      lboard[(unsigned char)(to - 1)] = lboard[(unsigned char)(to + 1)];
-      lboard[(unsigned char)(to + 1)] = EMPTY;
-    } else {                                      /* lato donna */
-      lboard[(unsigned char)(to + 1)] = lboard[(unsigned char)(to - 2)];
-      lboard[(unsigned char)(to - 2)] = EMPTY;
+    if (pt == KING && (to - from == 2 || from - to == 2)) {
+        if (to > from) {
+            lboard[(u8)(to - 1)] = lboard[(u8)(to + 1)];
+            lboard[(u8)(to + 1)] = EMPTY;
+        } else {
+            lboard[(u8)(to + 1)] = lboard[(u8)(to - 2)];
+            lboard[(u8)(to - 2)] = EMPTY;
+        }
     }
-  }
 
-  lside ^= 1;
+    lside ^= 1;
+}
+
+static u8 find_king(u8 color)
+{
+    u8 r, f, sq, p;
+    for (r = 0; r < 8; r++)
+        for (f = 0; f < 8; f++) {
+            sq = (u8)((r << 4) | f);
+            p = lboard[sq];
+            if (PT(p) == KING && PC(p) == color) return sq;
+        }
+    return 0xFF;
 }
 
 /* ================================================================== */
-/* disegno                                                             */
+/* scacchiera                                                         */
 /* ================================================================== */
 
-static void draw_board(void) {
-  static const char glyph[7] = " PNBRQK";
-  unsigned char r, f, sq, p;
+/* codice schermo della cella (cr,cc) della casa 3x3; 0xE0 = blocco casa.
+ * glyph hires: neri da 0x40, bianchi da 0x76, 9 char per pezzo */
+static u8 piece_code(u8 p, u8 cr, u8 cc)
+{
+    u8 t, base;
 
-  clrscr();
-  textcolor(COLOR_CYAN);
-  cprintf("esp32chess (draft)\r\n\r\n");
+    if (!p) return 0xE0;
 
-  textcolor(COLOR_WHITE);
-  cprintf("  a b c d e f g h\r\n");
-  for (r = 8; r >= 1; r--) {
-    textcolor(COLOR_WHITE);
-    cprintf("%d ", r);
-    for (f = 0; f < 8; f++) {
-      sq = (unsigned char)(((r - 1) << 4) | f);
-      p  = lboard[sq];
-      if (p) {
-        textcolor(PC(p) ? COLOR_YELLOW : COLOR_WHITE);
-        cputc(glyph[PT(p)]);
-      } else {
-        textcolor(COLOR_GRAY2);
-        cputc('.');
-      }
-      cputc(' ');
-    }
-    cprintf("\r\n");
-  }
-  textcolor(COLOR_WHITE);
-  cprintf("  a b c d e f g h\r\n");
+    t = (u8)(PT(p) - 1);
+    base = (PC(p) == BLACK) ? 64 : 118;
 
-  textcolor(COLOR_GREEN);
-  cprintf("You: %s   Level: %d\r\n",
-          humanColor ? "black" : "white", (int)level + 1);
+    return (u8)(base + t * 9 + cr * 3 + cc);
 }
 
-/* e2e4 -> "e2e4" */
-static void move_str(unsigned int m, char *out) {
-  out[0] = (char)('a' + (M_FROM(m) & 7));
-  out[1] = (char)('1' + (M_FROM(m) >> 4));
-  out[2] = (char)('a' + (M_TO(m) & 7));
-  out[3] = (char)('1' + (M_TO(m) >> 4));
-  out[4] = 0;
+/* colore della casa: giallo = destinazione ultima mossa o selezione,
+   cyan = cursore joystick, altrimenti chiaro/scuro a scacchiera */
+static u8 square_color(u8 sq)
+{
+    u8 rank = (u8)(sq >> 4);
+    u8 file = (u8)(sq & 7);
+
+    if (!emptyBoard) {
+        if (sq == h2 || sq == joyFrom) return COLOR_YELLOW;
+        if (sq == joyCursor) return COLOR_CYAN;
+    }
+    return (u8)(((rank + file) & 1) ? COLOR_GRAY3 : COLOR_BLUE);
+}
+
+/* disegna una casa 3x3: sfondo colorato (glyph 0xE0) e pezzo "scavato" */
+static void draw_square(u8 sq)
+{
+    u8 r, f, x, y, cr, cc, p, col, code;
+    u16 sbase;
+
+    p = lboard[sq];
+    if (emptyBoard) p = 0;
+    col = square_color(sq);
+    r = flip ? (u8)(sq >> 4) : (u8)(7 - (sq >> 4));
+    f = flip ? (u8)(7 - (sq & 7)) : (u8)(sq & 7);
+    x = (u8)(BOARD_X + 3 * f);
+    y = (u8)(BOARD_Y + 3 * r);
+    sbase = (u16)(SCR_BASE + y * 40 + x);
+
+    for (cr = 0; cr < 3; cr++) {
+        for (cc = 0; cc < 3; cc++) {
+            code = piece_code(p, cr, cc);
+            POKE((u16)(sbase + cr * 40 + cc), code);
+            POKE((u16)(sbase - SCR_BASE + COL_BASE + cr * 40 + cc), col);
+        }
+    }
+}
+
+static void draw_board(void)
+{
+    u8 r, f, rank, file, sq;
+
+    scr_clear();
+    scr_puts(0, 0, "ESP32CHESS", COL_TITLE);
+    scr_puts(11, 0, "V18", COL_HINT);  /* marcatore build: se non appare,
+                                            sulla C64 gira un .prg vecchio */
+
+    if (!emptyBoard)
+        for (f = 0; f < 8; f++)
+            scr_put((u8)(BOARD_X + 3 * f + 1), FILE_ROW,
+                    to_screen((char)('a' + (flip ? (7 - f) : f))), COLOR_WHITE);
+
+    for (r = 0; r < 8; r++) {
+        rank = flip ? r : (u8)(7 - r);
+        if (!emptyBoard)
+            scr_put(RANK_COL_R, (u8)(BOARD_Y + 3 * r + 1),
+                    to_screen((char)('1' + rank)), COLOR_WHITE);
+        for (f = 0; f < 8; f++) {
+            file = flip ? (u8)(7 - f) : f;
+            sq = (u8)((rank << 4) | file);
+            draw_square(sq);
+        }
+    }
+}
+
+/* ridisegna la casa sq con l'evidenziazione corrente */
+static void paint_sq(u8 sq)
+{
+    if (sq == 0xFF) return;
+    draw_square(sq);
+}
+
+/* ================================================================== */
+/* timer                                                               */
+/* ================================================================== */
+
+static u32 player_ticks(void)
+{
+    return plBase + (segWho == SEG_PLAYER ? (u32)clock() - segT0 : 0UL);
+}
+
+static u32 ai_ticks(void)
+{
+    return aiBase + (segWho == SEG_AI ? (u32)clock() - segT0 : 0UL);
+}
+
+/* chiude il segmento corrente (se diverso) e apre quello di who */
+static void seg_open(u8 who)
+{
+    if (segWho == who) return;
+    if (segWho == SEG_PLAYER) plBase += (u32)clock() - segT0;
+    else                      aiBase += (u32)clock() - segT0;
+    segT0 = (u32)clock();
+    segWho = who;
+}
+
+/* m:ss da jiffy */
+static void scr_time(u8 x, u8 y, u32 j, u8 color)
+{
+    unsigned int m = (unsigned int)((j / 3600UL) % 100);
+    char b[7];
+    u8 i = 0;
+
+    if (m >= 10) b[i++] = (char)('0' + m / 10);
+    b[i++] = (char)('0' + (m % 10));
+    b[i++] = ':';
+    b[i++] = (char)('0' + ((j / 600UL) % 6));
+    b[i++] = (char)('0' + ((j / 60UL) % 10));
+    b[i] = 0;
+    scr_blank(x, y, 6, COLOR_BLACK);
+    scr_puts(x, y, b, color);
+}
+
+static void show_timers(void)
+{
+    scr_puts(0, TIME_YOU_ROW, "YOU", COLOR_WHITE);
+    scr_time(4, TIME_YOU_ROW, player_ticks(), COLOR_WHITE);
+    scr_puts(0, TIME_AI_ROW, "AI", COLOR_WHITE);
+    scr_time(4, TIME_AI_ROW, ai_ticks(), COLOR_WHITE);
+}
+
+/* ================================================================== */
+/* pannello di stato                                                   */
+/* ================================================================== */
+
+static void put_msg(const char *s, u8 color)
+{
+    scr_puts(0, MSG_ROW, s, color);
+}
+
+/* tiene il messaggio a schermo per ~1,5 s (con i timer aggiornati):
+ * senza, il prompt successivo lo cancella prima di renderlo leggibile */
+static void msg_hold(void)
+{
+    u32 t = (u32)clock() + 90;
+    while ((u32)clock() < t) show_timers();
+    scr_blank(0, MSG_ROW, PANEL_W, COLOR_BLACK);
+}
+
+static void show_status(void)
+{
+    scr_blank(0, MOVE_ROW, PANEL_W, COLOR_BLACK);
+    scr_puts(0, MOVE_ROW, "AI:", COLOR_WHITE);
+    if (hasAiMove) scr_puts(4, MOVE_ROW, aiMove, COLOR_YELLOW);
+
+    scr_blank(0, VAL_ROW, PANEL_W, COLOR_BLACK);
+    scr_puts(0, VAL_ROW, "val", COLOR_WHITE);
+    if (hasAiMove) scr_snum(4, VAL_ROW, aiScore, COLOR_WHITE);
+
+    scr_blank(0, DEPTH_ROW, PANEL_W, COLOR_BLACK);
+    scr_puts(0, DEPTH_ROW, "d", COLOR_WHITE);
+    if (hasAiMove) scr_unum(2, DEPTH_ROW, (unsigned int)aiDepth, COLOR_WHITE);
+
+    if (checkFlag == 1) scr_puts(0, CHECK_ROW, "SCACCO!", COLOR_LIGHTRED);
+    else if (checkFlag == 2) scr_puts(0, CHECK_ROW, "SCACCO!", COLOR_YELLOW);
+    else if (drawNote == 1) scr_puts(0, CHECK_ROW, "50 MOSSE", COLOR_YELLOW);
+    else if (drawNote == 2) scr_puts(0, CHECK_ROW, "RIPETIZIONE", COLOR_YELLOW);
+    else scr_blank(0, CHECK_ROW, PANEL_W, COLOR_BLACK);
+}
+
+/* ================================================================== */
+/* SAN (notazione algebrica internazionale) sulla board locale         */
+/* ================================================================== */
+
+/* 1 = da `from` a `to` in linea retta (diag/straight) senza ostacoli */
+static int san_slide(u8 from, u8 to, int diag, int straight)
+{
+    int df = (int)(to & 7) - (int)(from & 7);
+    int dr = (int)(to >> 4) - (int)(from >> 4);
+    int sf, sr, f, r;
+
+    if (diag && dr != 0 && dr == df)          sf = (df > 0) - (df < 0), sr = 1;
+    else if (diag && dr != 0 && dr == -df)    sf = (df > 0) - (df < 0), sr = -1;
+    else if (straight && dr == 0 && df != 0)  sf = (df > 0) - (df < 0), sr = 0;
+    else if (straight && df == 0 && dr != 0)  sf = 0, sr = (dr > 0) - (dr < 0);
+    else return 0;
+
+    f = (int)(from & 7) + sf;
+    r = (int)(from >> 4) + sr;
+    for (;;) {
+        if (f == (int)(to & 7) && r == (int)(to >> 4)) return 1;
+        if (lboard[(u8)((r << 4) | f)] != EMPTY) return 0;
+        f += sf; r += sr;
+    }
+}
+
+/* 1 = il pezzo su sq (stesso tipo) puo' raggiungere `to` pseudo-legalmente */
+static int san_reaches(u8 sq, u8 to, u8 pt)
+{
+    int df = (int)(to & 7) - (int)(sq & 7);
+    int dr = (int)(to >> 4) - (int)(sq >> 4);
+    int adf = df < 0 ? -df : df, adr = dr < 0 ? -dr : dr;
+
+    if (sq == to) return 0;
+    if (lboard[to] != EMPTY && PT(lboard[to]) == KING) return 0;
+    switch (pt) {
+        case KNIGHT:  return (adf == 1 && adr == 2) || (adf == 2 && adr == 1);
+        case BISHOP:  return san_slide(sq, to, 1, 0);
+        case ROOK:    return san_slide(sq, to, 0, 1);
+        case QUEEN:   return san_slide(sq, to, 1, 1);
+        case KING:    return (adf <= 1 && adr <= 1);
+        case PAWN: {
+            int fwd = (PC(lboard[sq]) == WHITE) ? 1 : -1;
+            int r0 = (int)(sq >> 4);
+            if (df == 0 && dr == fwd && lboard[to] == EMPTY) return 1;
+            if (df == 0 && dr == 2 * fwd && (r0 == 1 || r0 == 6) &&
+                lboard[(u8)(sq + 16 * fwd)] == EMPTY && lboard[to] == EMPTY) return 1;
+            if ((df == 1 || df == -1) && dr == fwd && lboard[to] != EMPTY) return 1;
+            return 0;
+        }
+        default: return 0;
+    }
+}
+
+/* SAN della mossa m (board locale PRIMA di applicarla), senza suffissi
+ * +/#. buf >= 8 byte: il massimo e' "Qh4xe1" (7). */
+static void san_of_move(u16 m, char *buf)
+{
+    u8 from = M_FROM(m), to = M_TO(m), pr = M_PROMO(m);
+    u8 p = lboard[from], pt = PT(p), pc = PC(p);
+    u8 others[16], no = 0, k;
+    u8 r, f, sq;
+    int pos = 0;
+    int isEp = (pt == PAWN && (u8)to == (u8)lep && (to & 7) != (from & 7));
+    int capture = (lboard[to] != EMPTY) || isEp;
+
+    if (pt == KING && ((u8)(to - from) == 2 || (u8)(from - to) == 2)) {
+        strcpy(buf, (to > from) ? "O-O" : "O-O-O");
+        return;
+    }
+
+    if (pt != PAWN) {
+        /* altre case con un pezzo equivalente che puo' andare su `to`:
+         * serve la disambiguazione (file, rank o entrambe) */
+        for (r = 0; r < 8; r++)
+            for (f = 0; f < 8; f++) {
+                sq = (u8)((r << 4) | f);
+                if (sq != from && PT(lboard[sq]) == pt && PC(lboard[sq]) == pc &&
+                    san_reaches(sq, to, pt) && no < 16)
+                    others[no++] = sq;
+            }
+        buf[pos++] = " PNBRQK"[pt];
+        if (no) {
+            int fSame = 0, rSame = 0;
+            for (k = 0; k < no; k++) {
+                if ((others[k] & 7) == (from & 7)) fSame = 1;
+                if ((others[k] >> 4) == (from >> 4)) rSame = 1;
+            }
+            if (!fSame)      buf[pos++] = (char)('a' + (from & 7));
+            else if (!rSame) buf[pos++] = (char)('1' + (from >> 4));
+            else {
+                buf[pos++] = (char)('a' + (from & 7));
+                buf[pos++] = (char)('1' + (from >> 4));
+            }
+        }
+        if (capture) buf[pos++] = 'x';
+    } else if (capture) {
+        buf[pos++] = (char)('a' + (from & 7));
+        buf[pos++] = 'x';
+    }
+
+    buf[pos++] = (char)('a' + (to & 7));
+    buf[pos++] = (char)('1' + (to >> 4));
+    if (pt == PAWN && ((to >> 4) == 0 || (to >> 4) == 7)) {
+        buf[pos++] = '=';
+        buf[pos++] = "NBRQ"[pr];
+    }
+    buf[pos] = 0;
+}
+
+/* ================================================================== */
+/* cronologia mosse (colonna sinistra): coppie SAN "12.Nf3 Nc6",        */
+/* scorre sulle ultime 2*HIST_ROWS semimosse                           */
+/* ================================================================== */
+
+static void hist_push(u16 m, const char *san)
+{
+    if (histN >= 400) return;
+    hist[histN] = m;
+    memcpy(histSan[histN], san, 8);
+    histN++;
+}
+
+/* copia clampata: al massimo maxc caratteri di s (SENza garanzia di NUL) */
+static int line_put(char *line, int pos, const u8 *s, int max, int maxc)
+{
+    int i;
+    for (i = 0; i < maxc && s[i] && pos < max; i++)
+        line[pos++] = (char)s[i];
+    return pos;
+}
+
+static void show_history(void)
+{
+    char line[24];
+    u16 npairs, first, pn;
+    u8 row, pos, num;
+
+    scr_puts(0, HIST_HEAD, "MOSSE u=undo", COLOR_WHITE);
+    for (row = 0; row < HIST_ROWS; row++)
+        scr_blank(0, HIST_ROW + row, PANEL_W, COLOR_BLACK);
+
+    npairs = (u16)((histN + 1) >> 1);
+    first = (npairs > HIST_ROWS) ? (u16)(npairs - HIST_ROWS) : 0;
+
+    for (pn = first; pn < npairs; pn++) {
+        row = (u8)(pn - first);
+        pos = 0;
+        num = (u8)(pn + 1);
+        if (num >= 100) line[pos++] = (char)('0' + num / 100);
+        if (num >= 10)  line[pos++] = (char)('0' + (num / 10) % 10);
+        line[pos++] = (char)('0' + num % 10);
+        line[pos++] = '.';
+        pos = line_put(line, pos, histSan[pn * 2], PANEL_W, 8);
+        if (pn * 2 + 1 < histN && pos < PANEL_W) {
+            line[pos++] = ' ';
+            pos = line_put(line, pos, histSan[pn * 2 + 1], PANEL_W, 8);
+        }
+        line[pos] = 0;
+        scr_puts(0, HIST_ROW + row, line, COLOR_WHITE);
+    }
+}
+
+/* ================================================================== */
+/* mossa del giocatore visibile subito                                 */
+/* ================================================================== */
+
+static void snap_save(void)
+{
+    memcpy(snapBoard, lboard, sizeof(lboard));
+    snapLep = lep;
+    snapSide = lside;
+    snapH1 = h1;
+    snapH2 = h2;
+}
+
+static void snap_restore(void)
+{
+    memcpy(lboard, snapBoard, sizeof(lboard));
+    lep = snapLep;
+    lside = snapSide;
+    h1 = snapH1;
+    h2 = snapH2;
+}
+
+/* case toccate dall'ultima ui_apply_move: servono a ripristinare il
+ * disegno dopo una mossa rifiutata dall'ESP32 (solo quelle, non tutta
+ * la scacchiera) */
+static u8 drawnSq[6];
+static u8 drawnN;
+
+/* applica una mossa alla copia locale e ridisegna SOLO le case toccate
+ * (arrocco ed en passant compresi) */
+static void ui_apply_move(u16 m)
+{
+    u8 from = M_FROM(m);
+    u8 to = M_TO(m);
+    u8 p = lboard[from];
+    u8 t = PT(p);
+    u8 pc = PC(p);
+    u8 oh2 = h2;
+    u8 capture = (u8)(lboard[to] != EMPTY);
+    u8 rookFrom = 0xFF, rookTo = 0xFF, epCap = 0xFF;
+
+    if (t == KING && ((u8)(to - from) == 2 || (u8)(from - to) == 2)) {
+        if (to > from) { rookFrom = (u8)(to + 1); rookTo = (u8)(to - 1); }
+        else           { rookFrom = (u8)(to - 2); rookTo = (u8)(to + 1); }
+    } else if (t == PAWN && lboard[to] == EMPTY && (to & 7) != (from & 7)) {
+        epCap = (u8)(to + (pc == WHITE ? -16 : 16));
+        capture = 1;
+    }
+
+    apply_move_local(m);
+    h1 = from;
+    h2 = to;
+    joyFrom = 0xFF;
+    joyCursor = 0xFF;
+    checkFlag = 0;
+    drawNote = 0;
+    sfx_move(capture);
+
+    drawnN = 0;
+    if (oh2 != 0xFF)      drawnSq[drawnN++] = oh2;
+    drawnSq[drawnN++] = from;
+    drawnSq[drawnN++] = to;
+    if (rookFrom != 0xFF) { drawnSq[drawnN++] = rookFrom; drawnSq[drawnN++] = rookTo; }
+    if (epCap != 0xFF)    drawnSq[drawnN++] = epCap;
+
+    for (pc = 0; pc < drawnN; pc++)      /* pc riusato come indice */
+        draw_square(drawnSq[pc]);
+
+    scr_blank(0, CHECK_ROW, PANEL_W, COLOR_BLACK);   /* via il vecchio avviso */
 }
 
 /* ================================================================== */
 /* input                                                               */
 /* ================================================================== */
 
-static void read_line(char *buf, unsigned char max) {
-  unsigned char n = 0, c;
-  for (;;) {
-    c = cgetc();
-    if (c == 0x0D) {                     /* RETURN */
-      cputc('\r');
-      cputc('\n');
-      break;
-    }
-    if (c == 0x14 || c == 0x08 || c == 0x7F) {   /* DEL / backspace */
-      if (n) {
-        n--;
-        gotoxy(wherex() - 1, wherey());
-        cputc(' ');
-        gotoxy(wherex() - 1, wherey());
-      }
-      continue;
-    }
-    if (n < max && c >= 0x20 && c < 0x7F) {
-      buf[n++] = (char)c;
-      cputc(c);
-    }
-  }
-  buf[n] = 0;
-}
-
 /* "e2e4", "e2-e4", "e2 e4", "e7e8q" -> mossa 16 bit (o MOVE_NONE).
  * La promozione di default e' la donna (solo per i pedoni che promuovono). */
-static unsigned int parse_local(const char *s) {
-  unsigned char f0, r0, f1, r1, promo = 3, isPromo;
-  unsigned char p;
+static u16 parse_local(const char *s) {
+    u8 f0, r0, f1, r1, promo = 3, isPromo;
+    u8 p;
 
-  while (*s == ' ') s++;
-  if (*s >= 'a' && *s <= 'h')      f0 = (unsigned char)(*s - 'a');
-  else if (*s >= 'A' && *s <= 'H') f0 = (unsigned char)(*s - 'A');
-  else return MOVE_NONE;
-  s++;
-  if (*s < '1' || *s > '8') return MOVE_NONE;
-  r0 = (unsigned char)(*s - '1');
-  s++;
-  if (*s == '-' || *s == ' ') s++;
-  if (*s >= 'a' && *s <= 'h')      f1 = (unsigned char)(*s - 'a');
-  else if (*s >= 'A' && *s <= 'H') f1 = (unsigned char)(*s - 'A');
-  else return MOVE_NONE;
-  s++;
-  if (*s < '1' || *s > '8') return MOVE_NONE;
-  r1 = (unsigned char)(*s - '1');
-  s++;
-  if (*s == '-' || *s == ' ') s++;
-  if (*s) {
-    if (*s == 'q' || *s == 'Q')      promo = 3;
-    else if (*s == 'n' || *s == 'N') promo = 0;
-    else if (*s == 'b' || *s == 'B') promo = 1;
-    else if (*s == 'r' || *s == 'R') promo = 2;
+    while (*s == ' ') s++;
+    if (*s >= 'a' && *s <= 'h')      f0 = (u8)(*s - 'a');
+    else if (*s >= 'A' && *s <= 'H') f0 = (u8)(*s - 'A');
     else return MOVE_NONE;
-  }
+    s++;
+    if (*s < '1' || *s > '8') return MOVE_NONE;
+    r0 = (u8)(*s - '1');
+    s++;
+    if (*s == '-' || *s == ' ') s++;
+    if (*s >= 'a' && *s <= 'h')      f1 = (u8)(*s - 'a');
+    else if (*s >= 'A' && *s <= 'H') f1 = (u8)(*s - 'A');
+    else return MOVE_NONE;
+    s++;
+    if (*s < '1' || *s > '8') return MOVE_NONE;
+    r1 = (u8)(*s - '1');
+    s++;
+    if (*s == '-' || *s == ' ') s++;
+    if (*s) {
+        if (*s == 'q' || *s == 'Q')      promo = 3;
+        else if (*s == 'n' || *s == 'N') promo = 0;
+        else if (*s == 'b' || *s == 'B') promo = 1;
+        else if (*s == 'r' || *s == 'R') promo = 2;
+        else return MOVE_NONE;
+    }
 
-  p = lboard[(unsigned char)((r0 << 4) | f0)];
-  isPromo = (PT(p) == PAWN && (r1 == 0 || r1 == 7));
-  if (!isPromo) promo = 0;
+    p = lboard[(u8)((r0 << 4) | f0)];
+    isPromo = (u8)(PT(p) == PAWN && (r1 == 0 || r1 == 7));
+    if (!isPromo) promo = 0;
 
-  return MK_MOVE((unsigned char)((r0 << 4) | f0),
-                 (unsigned char)((r1 << 4) | f1),
-                 promo);
+    return MK_MOVE((u8)((r0 << 4) | f0),
+                   (u8)((r1 << 4) | f1),
+                   promo);
+}
+
+/* ------------------------------------------------------------------ */
+/* joystick                                                            */
+/* ------------------------------------------------------------------ */
+
+#define JB_UP    0x01
+#define JB_DOWN  0x02
+#define JB_LEFT  0x04
+#define JB_RIGHT 0x08
+#define JB_FIRE  0x10
+
+static u8 joy_read_raw(void)
+{
+    u8 p2 = (u8)((PEEK(0xDC00) ^ 0x1F) & 0x1F);
+    u8 p1 = (u8)((PEEK(0xDC01) ^ 0x1F) & 0x1F);
+    return p2 ? p2 : p1;   /* 1 = premuto */
+}
+
+static u8 joy_poll(void)
+{
+    static u8 stable = 0;       /* ultimo stato stabile (debounced) */
+    static u8 cand = 0;         /* stato in stabilizzazione */
+    static u8 candCnt = 0;
+    static u8 prev = 0;
+    static u32 lastTick = 0;
+    static u32 holdT0 = 0;      /* inizio della tenuta dello stato stabile */
+    static u32 lastRep = 0;     /* ultimo auto-repeat */
+    u32 now = (u32)clock();
+    u8 raw = joy_read_raw();
+    u8 e;
+
+    if (raw != cand) {
+        cand = raw;
+        candCnt = 0;
+    }
+    if (now != lastTick) {
+        lastTick = now;
+        if (candCnt < 2) candCnt++;
+        if (candCnt == 2 && stable != cand) {
+            stable = cand;      /* nuovo stato stabile: reset del repeat */
+            holdT0 = now;
+            lastRep = now;
+        }
+    }
+
+    e = (u8)(stable & (stable ^ prev));   /* press: nuovo evento */
+    prev = stable;
+    if (e) return e;
+
+    /* auto-repeat delle direzioni se tenute (non con il fire premuto):
+     * dopo ~1/4 s di tenuta, un passo ogni ~2 jiffy */
+    if (!(stable & JB_FIRE) && (stable & 0x0F) &&
+        now - holdT0 > 15 && now - lastRep >= 2) {
+        lastRep = now;
+        return (u8)(stable & 0x0F);
+    }
+    return 0;
+}
+
+static u16 move_from_squares(u8 from, u8 to)
+{
+    char s[6];
+
+    s[0] = (char)('a' + (from & 7));
+    s[1] = (char)('1' + (from >> 4));
+    s[2] = (char)('a' + (to & 7));
+    s[3] = (char)('1' + (to >> 4));
+    s[4] = 'q';                 /* promozione default: la valida l'ESP32 */
+    s[5] = 0;
+    return parse_local(s);
+}
+
+/* input della mossa umana: tastiera (e2e4) oppure joystick (cursore).
+   Ritorna la mossa scelta, MOVE_UNDO per 'u', MOVE_NONE per uscire. */
+static u16 get_human_move(void)
+{
+    char kb[8];
+    u8 klen = 0;
+    u8 r, f, sq, e;
+    u32 lastJfy;
+    int c;
+
+    scr_blank(0, PROMPT_ROW, PANEL_W, COLOR_BLACK);
+    scr_blank(0, MSG_ROW, PANEL_W, COLOR_BLACK);
+    scr_puts(0, PROMPT_ROW, "MOSSA:", COLOR_WHITE);
+
+    joyCursor = find_king(lside);
+    joyFrom = 0xFF;
+    paint_sq(joyCursor);
+
+    lastJfy = (u32)clock();
+    for (;;) {
+        if ((u32)clock() != lastJfy) {      /* timer giocatore live */
+            lastJfy = (u32)clock();
+            show_timers();
+        }
+
+        if (kbhit()) {
+            c = cgetc();
+            if (c == 13 || c == 10) {
+                u16 mv;
+                if (klen == 0) continue;
+                kb[klen] = 0;
+                if (klen == 1 && (kb[0] == 'u' || kb[0] == 'U'))
+                    return MOVE_UNDO;
+                mv = parse_local(kb);
+                if (mv != MOVE_NONE) return mv;
+                put_msg("MOSSA ERRATA", COLOR_LIGHTRED);
+                sfx_error();
+                while (klen) {
+                    klen--;
+                    scr_put((u8)(KB_COL + klen), PROMPT_ROW, 0x20, COLOR_WHITE);
+                }
+                continue;
+            }
+            if (c == 20 || c == 8) {
+                if (klen) {
+                    klen--;
+                    scr_put((u8)(KB_COL + klen), PROMPT_ROW, 0x20, COLOR_WHITE);
+                }
+                continue;
+            }
+            if (c == 3 || c == '.') return MOVE_NONE;
+            if (klen < 5) {
+                scr_put((u8)(KB_COL + klen), PROMPT_ROW, to_screen((char)c), COLOR_WHITE);
+                kb[klen++] = (char)c;
+            }
+        } else {
+            e = joy_poll();
+            if (!e) continue;
+
+            r = (u8)(joyCursor >> 4);
+            f = (u8)(joyCursor & 7);
+            if ((e & JB_UP)    && (flip ? r > 0 : r < 7)) r = (u8)(r + (flip ? -1 : 1));
+            if ((e & JB_DOWN)  && (flip ? r < 7 : r > 0)) r = (u8)(r + (flip ? 1 : -1));
+            if ((e & JB_LEFT)  && (flip ? f < 7 : f > 0)) f = (u8)(f + (flip ? 1 : -1));
+            if ((e & JB_RIGHT) && (flip ? f > 0 : f < 7)) f = (u8)(f + (flip ? -1 : 1));
+            sq = (u8)((r << 4) | f);
+
+            if (sq != joyCursor) {
+                u8 old = joyCursor;
+                joyCursor = sq;
+                paint_sq(old);
+                paint_sq(joyCursor);
+            }
+
+            if (e & JB_FIRE) {
+                if (joyFrom == 0xFF) {
+                    if (lboard[joyCursor] && PC(lboard[joyCursor]) == lside) {
+                        joyFrom = joyCursor;
+                        paint_sq(joyFrom);
+                    } else {
+                        put_msg("PEZZO NON TUO", COLOR_LIGHTRED);
+                        sfx_error();
+                    }
+                } else {
+                    u16 mv = move_from_squares(joyFrom, joyCursor);
+                    if (mv != MOVE_NONE) return mv;
+                    put_msg("MOSSA ERRATA", COLOR_LIGHTRED);
+                    sfx_error();
+                    {
+                        u8 oldFrom = joyFrom;
+                        joyFrom = 0xFF;
+                        if (lboard[joyCursor] && PC(lboard[joyCursor]) == lside)
+                            joyFrom = joyCursor;
+                        if (oldFrom != joyCursor) paint_sq(oldFrom);
+                        paint_sq(joyCursor);
+                    }
+                }
+            }
+        }
+    }
 }
 
 /* ================================================================== */
 /* protocollo                                                          */
 /* ================================================================== */
 
-static void wait_ack(void) {
-  (void)comm_rx_byte();                 /* attende (e ignora) la risposta */
+/* Errore di collegamento: svuota il buffer e segnala; il chiamante decide
+ * se provare a risincronizzare o uscire. */
+static void link_error(void) {
+    comm_rx_flush();
+    scr_blank(0, PROMPT_ROW, PANEL_W, COLOR_BLACK);
+    scr_blank(0, MSG_ROW, PANEL_W, COLOR_BLACK);
+    put_msg("ERRORE LINK", COLOR_LIGHTRED);
+    scr_puts(0, OVER_KEY_ROW, "PREMI TASTO", COLOR_WHITE);
+    (void)cgetc();
+    scr_blank(0, OVER_KEY_ROW, PANEL_W, COLOR_BLACK);
 }
 
-static void send_move(unsigned int m) {
-  comm_tx_byte(CMD_MOVE);
-  comm_tx_byte((unsigned char)(m & 0xFF));
-  comm_tx_byte((unsigned char)((m >> 8) & 0xFF));
+#define DRAIN_GAP_JFY 3u        /* ~50 ms di attesa per passata (jiffy 60 Hz) */
+#define DRAIN_GUARD   20000u    /* tetto di poll se il clock non ticchetta */
+
+/* Consuma i byte gia' arrivati + una coda in volo: due passate di poll
+ * separate da ~50 ms misurati sul jiffy clock (clock() = RDTIM). ~100 ms in
+ * tutto; il tetto DRAIN_GUARD copre il caso di clock fermo.
+ * Prima il ritardo era "a loop contato" (2 x 40000 iterazioni = 7,1 s
+ * misurati in VICE): un workaround per il clock creduto morto, che in
+ * realta' era solo il byte sbagliato ($A0 invece di $A2, vedi BUGS.md).
+ * Contatore a schermo (x=8, MSG_ROW) e limite FLOOD: se arrivano piu' di
+ * 200 byte l'ESP32 trasmette senza sosta e il drain non finirebbe mai. */
+static void drain_link(void) {
+    u16 n = 0, guard;
+    u8 pass;
+    for (pass = 0; pass < 2; pass++) {
+        u32 deadline = (u32)clock() + DRAIN_GAP_JFY;
+        guard = 0;
+        while ((u32)clock() < deadline && ++guard < DRAIN_GUARD) {
+            int b = comm_rx_poll();
+            if (b < 0) continue;
+            n++;
+            scr_unum(8, MSG_ROW, n, COLOR_YELLOW);
+            if (n > 200) { put_msg("FLOOD", COLOR_LIGHTRED); return; }
+        }
+    }
 }
 
-static void show_game_over(unsigned char reason, unsigned char winner) {
-  static const char *msg[5] = {
-    "CHECKMATE", "STALEMATE", "50 MOVE DRAW", "REPETITION", "MATERIAL"
-  };
-  textcolor(COLOR_LIGHTRED);
-  if (reason >= 1 && reason <= 5)
-    cprintf("\r\n%s!\r\n", msg[reason - 1]);
-  if (reason == OVER_MATE)
-    cprintf(winner == WINNER_WHITE ? "WHITE WINS" : "BLACK WINS");
-  else
-    cprintf("DRAW");
-  cprintf("\r\npress a key...\r\n");
-  (void)cgetc();
+/* Ritorna 1 se e' arrivato l'ACK, 0 su timeout/errore. La consegna dei
+ * comandi e' affidabile (tx con ack): se l'ACK si perde il comando e'
+ * comunque stato eseguito dall'ESP32. */
+static unsigned char wait_ack(void) {
+    return (comm_rx_byte(RX_TIMEOUT_CMD) == RSP_ACK) ? 1 : 0;
+}
+
+/* Ritorna 0 ok, -1 su errore di trasmissione. */
+static int send_move(u16 m) {
+    if (comm_tx_byte(CMD_MOVE) != 0) return -1;
+    if (comm_tx_byte((unsigned char)(m & 0xFF)) != 0) return -1;
+    if (comm_tx_byte((unsigned char)((m >> 8) & 0xFF)) != 0) return -1;
+    return 0;
+}
+
+/* Attende il primo byte di risposta aggiornando il timer dell'AI; usato
+ * quando l'ESP32 puo' impiegarci il tempo del think. Ritorna il byte,
+ * -1 su deadline scaduta.
+ * Usa comm_rx_poll (mai il flush di comm_rx_byte): il flush ripetuto ad
+ * ogni timeout puo' buttare via il byte che arriva proprio nella finestra
+ * tra l'ultimo controllo e lo svuotamento (~30us per poll) ed era la
+ * causa di LINK ERROR sporadici a partita avanzata. */
+static int wait_rsp(void) {
+    u32 deadline = (u32)clock() + MS_TO_JFY(RX_TIMEOUT_CMD);
+    u32 lastJfy = (u32)clock();
+    int r;
+
+    scr_blank(0, PROMPT_ROW, PANEL_W, COLOR_BLACK);
+    scr_puts(0, PROMPT_ROW, "PENSO...", COLOR_WHITE);
+    for (;;) {
+        r = comm_rx_poll();
+        if (r >= 0) return r;
+        if ((u32)clock() != lastJfy) {
+            lastJfy = (u32)clock();
+            show_timers();
+            if (lastJfy >= deadline) return -1;
+        }
+    }
+}
+
+/* Legge reason/winner di GAME_OVER. Ritorna 1 ok, 0 su timeout. */
+static unsigned char read_over_tail(unsigned char *reason, unsigned char *winner) {
+    int r = comm_rx_byte(RX_TIMEOUT_BYTE);
+    int w = comm_rx_byte(RX_TIMEOUT_BYTE);
+    if (r < 0 || w < 0) { link_error(); return 0; }
+    *reason = (unsigned char)r;
+    *winner = (unsigned char)w;
+    return 1;
+}
+
+/* Mostra il risultato e chiede cosa fare; esita in g_wantNew (1 = nuova
+ * partita). Il programma NON esce piu' in silenzio a BASIC dopo la partita. */
+static void show_game_over(u8 reason, u8 winner) {
+    static const char *rtxt[5] = {
+        "SCACCO MATTO", "STALLO", "75 MOSSE", "RIPETIZIONE", "MATERIALE"
+    };
+    char c;
+
+    sfx_gameover();
+    scr_blank(0, PROMPT_ROW, PANEL_W, COLOR_BLACK);
+    scr_blank(0, MSG_ROW, PANEL_W, COLOR_BLACK);
+    scr_blank(0, OVER_ROW, PANEL_W, COLOR_BLACK);
+    scr_blank(0, OVER_WHO_ROW, PANEL_W, COLOR_BLACK);
+    scr_blank(0, OVER_KEY_ROW, PANEL_W, COLOR_BLACK);
+
+    if (reason >= 1 && reason <= 5)
+        scr_puts(0, OVER_ROW, rtxt[reason - 1], COLOR_YELLOW);
+    else
+        scr_puts(0, OVER_ROW, "FINE PARTITA", COLOR_YELLOW);
+    if (reason == OVER_MATE || (reason == 0 && winner != WINNER_DRAW))
+        scr_puts(0, OVER_WHO_ROW,
+                 winner == WINNER_WHITE ? "BIANCO VINCE" : "NERO VINCE", COLOR_YELLOW);
+    else
+        scr_puts(0, OVER_WHO_ROW, "PATTA", COLOR_YELLOW);
+    scr_puts(0, OVER_KEY_ROW, "N=NUOVA Q=ESC", COLOR_WHITE);
+
+    for (;;) {
+        c = cgetc();
+        if (c == 'n' || c == 'N') { g_wantNew = 1; return; }
+        if (c == 'q' || c == 'Q') { g_wantNew = 0; return; }
+    }
 }
 
 /* Legge il payload di BEST_MOVE (il byte RSP_BEST_MOVE e' gia' stato letto),
- * applica la mossa del computer e mostra punteggio/profondita'.
- * Ritorna 1 se la partita e' finita. */
+ * applica la mossa del computer e aggiorna pannello e timer.
+ * NOTA: la mossa dell'umano e' gia' stata applicata e mostrata: qui si
+ * applica SOLO la mossa del computer.
+ * Ritorna 1 se la partita e' finita, 0 se prosegue, 2 su errore di link. */
 static unsigned char recv_best_payload(void) {
-  char buf[6];
-  unsigned int  m = (unsigned int)comm_rx_byte() | ((unsigned int)comm_rx_byte() << 8);
-  int score      = (int)((unsigned int)comm_rx_byte() | ((unsigned int)comm_rx_byte() << 8));
-  unsigned char depth = comm_rx_byte();
-  unsigned char flags = comm_rx_byte();
+    u16 m;
+    int b, score;
+    unsigned char depth, flags, reason, winner;
 
-  apply_move_local(m);
-  if (histN < 400) hist[histN++] = m;
+    b = comm_rx_byte(RX_TIMEOUT_BYTE); if (b < 0) { link_error(); return 2; }
+    m = (u16)b;
+    b = comm_rx_byte(RX_TIMEOUT_BYTE); if (b < 0) { link_error(); return 2; }
+    m |= (u16)b << 8;
+    b = comm_rx_byte(RX_TIMEOUT_BYTE); if (b < 0) { link_error(); return 2; }
+    score = b;
+    b = comm_rx_byte(RX_TIMEOUT_BYTE); if (b < 0) { link_error(); return 2; }
+    score |= b << 8;
+    b = comm_rx_byte(RX_TIMEOUT_BYTE); if (b < 0) { link_error(); return 2; }
+    depth = (unsigned char)b;
+    b = comm_rx_byte(RX_TIMEOUT_BYTE); if (b < 0) { link_error(); return 2; }
+    flags = (unsigned char)b;
 
-  move_str(m, buf);
-  textcolor(COLOR_CYAN);
-  cprintf("AI: %s (val %d, d%d)\r\n", buf, score, (int)depth);
+    aiScore = (s16)score;
+    aiDepth = depth;
 
-  if (flags & F_CHECK) {
-    textcolor(COLOR_LIGHTRED);
-    cprintf("CHECK!\r\n");
-  }
-  if (flags & F_GAMEOVER) {
-    unsigned char reason = comm_rx_byte();
-    unsigned char winner = comm_rx_byte();
-    show_game_over(reason, winner);
-    return 1;
-  }
-  return 0;
+    san_of_move(m, pendSan);          /* SAN: board PRIMA della mossa */
+    ui_apply_move(m);
+    hist_push(m, (const char *)pendSan);
+    show_history();
+
+    /* DOPO ui_apply_move: la mossa azzera checkFlag/drawNote, il flag del
+     * protocollo deve quindi venir applicato dopo (era il bug dello
+     * "SCACCO!" che non compariva quando eri tu sotto scacco) */
+    checkFlag = (u8)(flags & F_CHECK);
+    if (flags & F_DRAW50)       drawNote = 1;
+    else if (flags & F_DRAWREP) drawNote = 2;
+
+    memcpy(aiMove, pendSan, sizeof(aiMove));
+    if (checkFlag) {
+        u8 l = (u8)strlen(aiMove);
+        if (l < sizeof(aiMove) - 1) { aiMove[l] = '+'; aiMove[l + 1] = 0; }
+    }
+    hasAiMove = 1;
+
+    show_status();
+    show_timers();
+    if (checkFlag) sfx_check();
+
+    if (flags & F_GAMEOVER) {
+        if (!read_over_tail(&reason, &winner)) return 2;
+        show_game_over(reason, winner);
+        return 1;
+    }
+    return 0;
 }
 
-static void do_undo(void) {
-  unsigned int i;
-  if (histN < 2) {
-    textcolor(COLOR_LIGHTRED);
-    cprintf("nothing to undo\r\n");
-    return;
-  }
-  comm_tx_byte(CMD_UNDO);
-  wait_ack();
+/* Legge la risposta del computer a NEW_GAME/GO (dopo l'eventuale ACK).
+ * Ritorna 0 ok, 1 partita finita (show_game_over ha chiesto nuova/esci),
+ * 2 errore di link. */
+static unsigned char recv_engine_move(void) {
+    int r;
+    unsigned char reason, winner;
 
-  histN -= 2;
-  new_board_local();
-  for (i = 0; i < histN; i++) apply_move_local(hist[i]);
+    scr_blank(0, PROMPT_ROW, PANEL_W, COLOR_BLACK);
+    scr_blank(0, MSG_ROW, 12, COLOR_BLACK);      /* via la scritta THINKING */
+    r = wait_rsp();
+    if (r < 0) { link_error(); return 2; }
+    scr_blank(0, PROMPT_ROW, PANEL_W, COLOR_BLACK);
+    if (r == RSP_BEST_MOVE) return recv_best_payload();
+    if (r == RSP_GAME_OVER) {
+        if (!read_over_tail(&reason, &winner)) return 2;
+        show_game_over(reason, winner);
+        return 1;
+    }
+    link_error();
+    return 2;
+}
+
+/* Manda NEW_GAME e, se l'umano e' nero, consuma l'apertura del computer.
+ * Ricostruisce anche la board locale e azzera timer e pannello.
+ * Ritorna 0 ok, 1 partita finita subito, 2 errore di link. */
+static unsigned char start_new_game(void) {
+    histN = 0;
+    new_board_local();
+    h1 = h2 = 0xFF;
+    hasAiMove = 0;
+    checkFlag = 0;
+    joyFrom = 0xFF;
+    joyCursor = 0xFF;
+    plBase = aiBase = 0;
+    segT0 = (u32)clock();
+    segWho = SEG_PLAYER;
+    draw_board();
+
+    drain_link();
+    if (comm_tx_byte(CMD_NEW_GAME) != 0) { link_error(); return 2; }
+    (void)wait_ack();
+    show_history();
+    if (humanColor != BLACK) return 0;
+    return recv_engine_move();
+}
+
+/* Riallinea la UI allo stato vero dell'ESP32 senza buttare la partita:
+ * (ri)invia colore e livello (copre anche un reboot dell'ESP32), chiede lo
+ * storico mosse (GET_HIST) e ricostruisce la board locale; se dopo il resync
+ * tocca al computer lo fa muovere (GO).
+ * Ritorna 1 se la partita puo' continuare, 0 su errore di link. */
+static unsigned char resync_board(void) {
+    u16 n, i, m;
+    int b;
+
+    drain_link();
+    if (comm_tx_byte(CMD_SET_COLOR) != 0 ||
+        comm_tx_byte(humanColor) != 0) return 0;
+    (void)wait_ack();
+    if (comm_tx_byte(CMD_SET_LEVEL) != 0 ||
+        comm_tx_byte(level) != 0) return 0;
+    (void)wait_ack();
+    if (comm_tx_byte(CMD_GET_HIST) != 0) return 0;
+
+    b = comm_rx_byte(RX_TIMEOUT_BYTE);
+    if (b != RSP_HIST) { link_error(); return 0; }
+    b = comm_rx_byte(RX_TIMEOUT_BYTE); if (b < 0) { link_error(); return 0; }
+    n = (u16)b;
+    b = comm_rx_byte(RX_TIMEOUT_BYTE); if (b < 0) { link_error(); return 0; }
+    n |= (u16)b << 8;
+    if (n > 400) { link_error(); return 0; }
+
+    histN = 0;
+    if (endActive != 0xFF) end_load_local(endActive);
+    else                   new_board_local();
+    for (i = 0; i < n; i++) {
+        b = comm_rx_byte(RX_TIMEOUT_BYTE); if (b < 0) { link_error(); return 0; }
+        m = (u16)b;
+        b = comm_rx_byte(RX_TIMEOUT_BYTE); if (b < 0) { link_error(); return 0; }
+        m |= (u16)b << 8;
+        san_of_move(m, pendSan);      /* board PRIMA della mossa */
+        apply_move_local(m);
+        hist_push(m, (const char *)pendSan);
+    }
+    if (histN) {
+        h1 = M_FROM(hist[histN - 1]);
+        h2 = M_TO(hist[histN - 1]);
+    } else {
+        h1 = h2 = 0xFF;
+    }
+    hasAiMove = 0;
+    checkFlag = 0;
+    drawNote = 0;
+    joyFrom = 0xFF;
+    joyCursor = 0xFF;
+    draw_board();
+    show_history();
+    show_status();
+    show_timers();
+
+    if (lside != humanColor) {            /* tocca al computer: falla muovere */
+        if (comm_tx_byte(CMD_GO) != 0) { link_error(); return 0; }
+        if (recv_engine_move() == 2) return 0;
+    }
+    return 1;
+}
+
+/* Recupero automatico SENZA interrompere la partita: un byte perso in volo
+ * non deve piu' mostrare LINK ERROR (sintomo su hardware: dopo ~20 mosse).
+ * Prova un resync silenzioso (drain + colore/livello + GET_HIST: la board
+ * viene ricostruita dallo stato vero dell'ESP32); solo se anche il resync
+ * fallisce mostra LINK ERROR. Ritorna 1 se la partita puo' continuare. */
+static unsigned char recover_link(void) {
+    if (resync_board()) {
+        scr_blank(0, MSG_ROW, PANEL_W, COLOR_BLACK);   /* via il contatore drain */
+        return 1;
+    }
+    link_error();
+    return 0;
+}
+
+/* Ritorna 0 ok, 1 se il collegamento e' morto (game_loop deve uscire). */
+static unsigned char do_undo(void) {
+    u16 i;
+    if (histN < 2) {
+        put_msg("NIENTE UNDO", COLOR_LIGHTRED);
+        sfx_error();
+        return 0;
+    }
+    if (comm_tx_byte(CMD_UNDO) != 0)
+        return recover_link() ? 0 : 1;
+    (void)wait_ack();
+
+    histN -= 2;
+    if (endActive != 0xFF) end_load_local(endActive);
+    else                   new_board_local();
+    for (i = 0; i < histN; i++) apply_move_local(hist[i]);
+    if (histN) {
+        h1 = M_FROM(hist[histN - 1]);
+        h2 = M_TO(hist[histN - 1]);
+    } else {
+        h1 = h2 = 0xFF;
+    }
+    hasAiMove = 0;
+    checkFlag = 0;
+    drawNote = 0;
+    draw_board();
+    show_history();
+    show_status();
+    show_timers();
+    return 0;
+}
+
+/* ================================================================== */
+/* partite famose: replay con l'archivio dell'ESP32                    */
+/* ================================================================== */
+
+/* Sottomenu: 3 pagine da 10 a tutto schermo; 1-9 e 0 selezionano,
+ * SPAZIO pagina avanti, '.' o RUN-STOP indietro. Ritorna 0..29 o 0xFF
+ * se l'utente ripensa. */
+static void fame_draw(u8 page)
+{
+    u8 i, first = (u8)(page * FAME_PER_PAGE), cnt = FAME_PER_PAGE;
+
+    if ((u8)(first + cnt) > FAME_N) cnt = (u8)(FAME_N - first);
+    list_header("PARTITE FAMOSE", "SPAZIO=PAGINA  .=INDIETRO");
+    scr_put(37, 0, to_screen((char)('1' + page)), COL_HINT);
+    scr_put(38, 0, to_screen('/'), COL_HINT);
+    scr_put(39, 0, to_screen((char)('0' + FAME_PAGES)), COL_HINT);
+    for (i = 0; i < cnt; i++)
+        list_item((u8)(3 + LIST_STEP * i), (char)(i == 9 ? '0' : '1' + i),
+                  fameLabel[first + i]);
+}
+
+static u8 ask_fame(void)
+{
+    u8 page = 0, sel;
+    int c;
+
+    fame_draw(page);
+    for (;;) {
+        c = cgetc();
+        if (c == ' ') {
+            page = (u8)((page + 1) % FAME_PAGES);
+            fame_draw(page);
+            continue;
+        }
+        if (c == 3 || c == '.') return 0xFF;
+        if (c >= '1' && c <= '9')  sel = (u8)(page * FAME_PER_PAGE + (c - '1'));
+        else if (c == '0')         sel = (u8)(page * FAME_PER_PAGE + 9);
+        else continue;
+        if (sel < FAME_N) return sel;
+    }
+}
+
+/* Riproduce la partita idx dell'archivio ESP32, una semimossa ogni ~1 s.
+ * SPAZIO = pausa/riprendi, un altro tasto interrompe (torna al menu).
+ * Ritorna 1 se a fine partita l'utente vuole il menu, 0 se esce. */
+static u8 replay_loop(u8 idx)
+{
+    u16 n, i;
+    int b;
+    u8 stopped = 0;
+
+    histN = 0;
+    new_board_local();
+    h1 = h2 = 0xFF;
+    hasAiMove = 0;
+    checkFlag = 0;
+    drawNote = 0;
+    joyFrom = 0xFF;
+    joyCursor = 0xFF;
+    draw_board();
+    show_history();
+
+    drain_link();
+    if (comm_tx_byte(CMD_FAME_LOAD) != 0 || comm_tx_byte(idx) != 0) {
+        link_error(); return 0;
+    }
+    (void)wait_ack();
+    b = comm_rx_byte(RX_TIMEOUT_BYTE); if (b < 0) { link_error(); return 0; }
+    n = (u16)b;
+    b = comm_rx_byte(RX_TIMEOUT_BYTE); if (b < 0) { link_error(); return 0; }
+    n |= (u16)b << 8;
+
+    for (i = 0; i <= n; i++) {
+        u32 t = (u32)clock() + 60;          /* ~1 s tra le mosse */
+        while ((u32)clock() < t) {
+            if (kbhit()) {
+                int c = cgetc();
+                if (c != ' ') { stopped = 1; break; }
+                c = cgetc();                /* pausa: un altro tasto per riprendere */
+                if (c != ' ') { stopped = 1; break; }
+            }
+        }
+        if (stopped) break;
+
+        if (comm_tx_byte(CMD_FAME_NEXT) != 0) { link_error(); return 0; }
+        b = comm_rx_byte(RX_TIMEOUT_CMD);
+        if (b == RSP_MOVED) {
+            int f = comm_rx_byte(RX_TIMEOUT_BYTE);
+            int mlo = comm_rx_byte(RX_TIMEOUT_BYTE);
+            int mhi = comm_rx_byte(RX_TIMEOUT_BYTE);
+            u16 m;
+            if (f < 0 || mlo < 0 || mhi < 0) { link_error(); return 0; }
+            m = (u16)(mlo | ((u16)mhi << 8));
+            san_of_move(m, pendSan);        /* board PRIMA della mossa */
+            ui_apply_move(m);
+            hist_push(m, (const char *)pendSan);
+            show_history();
+            checkFlag = (u8)(f & F_CHECK);
+            if (checkFlag) {
+                show_status();
+                sfx_check();
+            }
+        } else if (b == RSP_GAME_OVER) {
+            unsigned char reason, winner;
+            if (!read_over_tail(&reason, &winner)) return 0;
+            show_game_over(reason, winner);  /* reason 0 = risultato storico */
+            return (u8)(g_wantNew ? 1 : 0);
+        } else {
+            link_error(); return 0;
+        }
+    }
+    if (stopped) {
+        /* partita interrotta: rimetti il firmware in attesa dei comandi */
+        if (comm_tx_byte(CMD_QUIT) == 0) (void)wait_ack();
+        return 1;                           /* torna al menu principale */
+    }
+    return 1;
+}
+
+/* ================================================================== */
+/* finali: posizioni archiviate, l'umano gioca il lato che vince       */
+/* ================================================================== */
+
+/* Sottomenu finali a tutto schermo: 1..7 selezionano, '.' o RUN-STOP
+ * indietro. Ritorna 0..END_COUNT-1 o 0xFF se l'utente ripensa. */
+static u8 ask_endgames(void)
+{
+    u8 i;
+    int c;
+
+    list_header("FINALI", "VINCI TU  .=INDIETRO");
+    for (i = 0; i < END_COUNT; i++)
+        list_item((u8)(3 + LIST_STEP * i), (char)('1' + i), endLabel[i]);
+
+    for (;;) {
+        c = cgetc();
+        if (c == 3 || c == '.') return 0xFF;
+        if (c >= '1' && (u8)(c - '1') < END_COUNT) return (u8)(c - '1');
+    }
+}
+
+/* Prepara il finale idx: board locale dai dati generati, END_LOAD
+ * sull'ESP32 (che imposta humanColor = lato che vince) e, se tocca al
+ * motore (difensore), GO. Ritorna come start_new_game:
+ * 0 ok, 1 partita finita subito, 2 errore di link. */
+static unsigned char start_endgame(u8 idx)
+{
+    histN = 0;
+    end_load_local(idx);
+    h1 = h2 = 0xFF;
+    hasAiMove = 0;
+    checkFlag = 0;
+    drawNote = 0;
+    joyFrom = 0xFF;
+    joyCursor = 0xFF;
+    plBase = aiBase = 0;
+    segT0 = (u32)clock();
+    segWho = SEG_PLAYER;
+    flip = (humanColor == BLACK) ? 1 : 0;
+    draw_board();
+    show_history();
+
+    drain_link();
+    if (comm_tx_byte(CMD_END_LOAD) != 0 || comm_tx_byte(idx) != 0) {
+        link_error(); return 2;
+    }
+    (void)wait_ack();
+    if (lside != humanColor) {            /* difensore al tratto: muove il motore */
+        if (comm_tx_byte(CMD_GO) != 0) { link_error(); return 2; }
+        return recv_engine_move();
+    }
+    return 0;
 }
 
 /* ================================================================== */
 /* loop di gioco                                                       */
 /* ================================================================== */
 
-static void game_loop(void) {
-  char buf[12];
-  for (;;) {
+static u8 game_loop(void) {
+    u16 m;
+    u8 from, p, reason, winner, rc;
+    int rsp;
+
+    for (;;) {
+        show_timers();
+        seg_open(SEG_PLAYER);
+        m = get_human_move();
+
+        if (m == MOVE_NONE) {                 /* '.' o RUN-STOP: esci */
+            if (comm_tx_byte(CMD_QUIT) == 0) (void)wait_ack();
+            return 0;
+        }
+        if (m == MOVE_UNDO) {                 /* 'u': annulla l'ultimo turno */
+            if (do_undo()) return 0;
+            continue;
+        }
+
+        from = M_FROM(m);
+        p = lboard[from];
+        if (p == EMPTY || PC(p) != lside) {
+            put_msg("PEZZO NON TUO", COLOR_LIGHTRED);
+            sfx_error();
+            msg_hold();
+            continue;
+        }
+
+        san_of_move(m, pendSan);      /* board PRIMA della mossa */
+        snap_save();
+        ui_apply_move(m);          /* mossa del giocatore visibile subito */
+        comm_rx_flush();
+        if (send_move(m) != 0) {   /* l'ESP32 non ha confermato: resync */
+            if (!recover_link()) return 0;
+            continue;
+        }
+
+        seg_open(SEG_AI);          /* il tempo d'attesa e' tempo dell'AI */
+        /* la conferma della mossa (MOVED) e l'eventuale rifiuto arrivano
+         * subito; con firmware vecchio (senza MOVED) si passa dritti a
+         * BEST_MOVE/GAME_OVER */
+        rsp = comm_rx_byte(RX_TIMEOUT_BYTE);
+
+        if (rsp == RSP_MOVED) {
+            int f = comm_rx_byte(RX_TIMEOUT_BYTE);
+            if (f < 0) {
+                if (!recover_link()) return 0;
+                continue;
+            }
+            if (f & F_CHECK) {                /* la tua mossa ha dato scacco */
+                checkFlag = 2;
+                show_status();
+                sfx_check();
+            }
+            /* patte reclamabili: solo avviso, la partita continua */
+            if (f & F_DRAW50)       drawNote = 1;
+            else if (f & F_DRAWREP) drawNote = 2;
+            if (drawNote) show_status();
+            rsp = wait_rsp();                 /* poi GAME_OVER o BEST_MOVE */
+        }
+
+        if (rsp == RSP_ILLEGAL) {
+            u8 i;
+            snap_restore();
+            for (i = 0; i < drawnN; i++)   /* ridisegna solo le case toccate */
+                draw_square(drawnSq[i]);
+            scr_blank(0, PROMPT_ROW, PANEL_W, COLOR_BLACK);
+            put_msg("MOSSA ERRATA", COLOR_LIGHTRED);
+            sfx_error();
+            msg_hold();
+            continue;
+        }
+        if (rsp == RSP_GAME_OVER) {           /* l'umano ha chiuso la partita */
+            hist_push(m, (const char *)pendSan);
+            show_history();
+            if (!read_over_tail(&reason, &winner)) return 0;
+            show_game_over(reason, winner);
+            return (u8)(g_wantNew ? 1 : 0);
+        }
+        if (rsp == RSP_BEST_MOVE) {           /* partita che prosegue */
+            hist_push(m, (const char *)pendSan);
+            rc = recv_best_payload();
+            if (rc == 2) {
+                if (!recover_link()) return 0;
+                continue;
+            }
+            if (rc == 1) {          /* show_game_over ha chiesto nuova/esci */
+                return (u8)(g_wantNew ? 1 : 0);
+            }
+            continue;
+        }
+        /* risposta ignota o assente: protocollo sfasato, non prosegue a vuoto */
+        if (!recover_link()) return 0;
+    }
+}
+
+/* ================================================================== */
+/* menu                                                                */
+/* ================================================================== */
+
+static u8 ask_level(void)
+{
+    static const char * const lv[4] = { "FACILE", "MEDIO", "DIFFICILE", "ESPERTO" };
+    u8 i;
+    int c;
+
+    menu_clear();
+    scr_puts(0, 2, "LIVELLO", COL_TITLE);
+    for (i = 0; i < 4; i++)
+        menu_item((u8)(4 + i), (char)('1' + i), lv[i], COLOR_WHITE);
+    do { c = cgetc(); } while (c < '1' || c > '4');
+    menu_item((u8)(4 + c - '1'), (char)c, lv[c - '1'], COLOR_YELLOW);  /* scelta */
+    return (u8)(c - '1');
+}
+
+static u8 ask_color(void)
+{
+    static const char * const cl[2] = { "BIANCO", "NERO" };
+    u8 i;
+    int c;
+
+    scr_puts(0, 10, "COLORE", COL_TITLE);
+    for (i = 0; i < 2; i++)
+        menu_item((u8)(12 + i), (char)('1' + i), cl[i], COLOR_WHITE);
+    do { c = cgetc(); } while (c < '1' || c > '2');
+    menu_item((u8)(12 + c - '1'), (char)c, cl[c - '1'], COLOR_YELLOW);
+    return (u8)(c - '1');
+}
+
+/* menu principale nel pannello (max 13 colonne) */
+static void draw_main_menu(void)
+{
+    menu_item(3, '1', "PARTITE", COLOR_WHITE);
+    scr_puts(2, 4, "FAMOSE", COLOR_WHITE);
+    menu_item(6, '2', "GIOCA",   COLOR_WHITE);
+    menu_item(8, '3', "FINALI",  COLOR_WHITE);
+}
+
+/* scacchiera vuota + menu: stessa schermata al primo giro (prima del flip
+ * video) e a fine partita */
+static void show_menu_screen(void)
+{
+    emptyBoard = 1;
     draw_board();
-    cprintf("\r\nmove: ");
-    read_line(buf, 8);
-
-    if (buf[0] == '.') {                  /* esci */
-      comm_tx_byte(CMD_QUIT);
-      wait_ack();
-      return;
-    }
-    if (buf[0] == 'u' || buf[0] == 'U') { /* undo */
-      do_undo();
-      continue;
-    }
-    {
-      unsigned int m = parse_local(buf);
-      unsigned char from, p, rsp;
-
-      if (m == MOVE_NONE) {
-        textcolor(COLOR_LIGHTRED);
-        cprintf("bad move\r\n");
-        continue;
-      }
-
-      /* controllo locale "leggero" (l'ESP32 decide comunque la legalita') */
-      from = M_FROM(m);
-      p    = lboard[from];
-      if (p == EMPTY || PC(p) != lside) {
-        textcolor(COLOR_LIGHTRED);
-        cprintf("not yours\r\n");
-        continue;
-      }
-
-      send_move(m);
-      rsp = comm_rx_byte();
-
-      if (rsp == RSP_ILLEGAL) {
-        textcolor(COLOR_LIGHTRED);
-        cprintf("bad move\r\n");
-        continue;
-      }
-      if (rsp == RSP_GAME_OVER) {         /* l'umano ha chiuso la partita */
-        unsigned char reason = comm_rx_byte();
-        unsigned char winner = comm_rx_byte();
-        show_game_over(reason, winner);
-        return;
-      }
-      if (rsp == RSP_BEST_MOVE) {         /* partita che prosegue */
-        apply_move_local(m);
-        if (histN < 400) hist[histN++] = m;
-        if (recv_best_payload()) return;
-      }
-    }
-  }
+    emptyBoard = 0;
+    draw_main_menu();
 }
 
 /* ================================================================== */
 
-int main(void) {
-  char c;
+int main(void)
+{
+    u8 rc, first;
+    int c;
 
-  clrscr();
-  textcolor(COLOR_WHITE);
-  bgcolor(COLOR_BLUE);
-  bordercolor(COLOR_BLUE);
+    POKE(0xD020, COLOR_BLACK);               /* bordo */
+    POKE(0xD021, COLOR_BLACK);               /* sfondo */
 
-  comm_install();
-  new_board_local();
-  humanColor = WHITE;
-  level      = LEVEL_MEDIUM;
+    comm_install();                          /* handler NMI al piu' presto */
+    install_charset();                       /* charset a $8800: finche' il VIC
+                                                resta in banca 0 non si vede */
+    new_board_local();
+    humanColor = WHITE;
+    level = LEVEL_MEDIUM;
+    h1 = h2 = 0xFF;
+    joyCursor = 0xFF;
+    joyFrom = 0xFF;
+    hasAiMove = 0;
+    segWho = SEG_PLAYER;
+    segT0 = (u32)clock();
 
-  /* menu */
-  cprintf("Your color? (w/b) ");
-  do { c = cgetc(); } while (c != 'w' && c != 'W' && c != 'b' && c != 'B');
-  humanColor = (c == 'b' || c == 'B') ? BLACK : WHITE;
-  cputc(c);
-  cprintf("\r\n");
+    /* il menu si prepara in RAM ($8400) mentre a video c'e' ancora lo
+     * schermo del BASIC: al flip appare gia' completo (scacchiera vuota
+     * E menu), senza la flash di scacchiera malformata (che prima si
+     * vedeva finche' charset e screen non erano pronti dopo la
+     * commutazione di $D018) */
+    show_menu_screen();
+    POKE(0xDD00, (u8)((PEEK(0xDD00) & 0xFC) | 0x01));  /* banca VIC 2 */
+    POKE(0xD018, 0x13);                      /* schermo $8400, charset $8800 */
 
-  cprintf("Level? (1-4) ");
-  do { c = cgetc(); } while (c < '1' || c > '4');
-  level = (unsigned char)(c - '1');
-  cputc(c);
-  cprintf("\r\n");
+    first = 1;
+    for (;;) {
+        u8 choice;
 
-  comm_tx_byte(CMD_SET_COLOR); comm_tx_byte(humanColor); wait_ack();
-  comm_tx_byte(CMD_SET_LEVEL); comm_tx_byte(level);      wait_ack();
-  comm_tx_byte(CMD_NEW_GAME);  wait_ack();
+        if (!first) show_menu_screen();
+        first = 0;
 
-  if (humanColor == BLACK) {
-    /* il computer (bianco) apre: BEST_MOVE (o GAME_OVER) subito dopo l'ACK */
-    unsigned char rsp = comm_rx_byte();
-    if (rsp == RSP_BEST_MOVE) {
-      if (recv_best_payload()) return 0;
-    } else if (rsp == RSP_GAME_OVER) {
-      unsigned char reason = comm_rx_byte();
-      unsigned char winner = comm_rx_byte();
-      show_game_over(reason, winner);
-      return 0;
+        do { c = cgetc(); } while (c < '1' || c > '3');
+        choice = (u8)(c - '1');
+
+        if (choice == 0) {                     /* partite famose */
+            u8 idx = ask_fame();
+            endActive = 0xFF;
+            if (idx != 0xFF) {
+                rc = replay_loop(idx);
+                if (rc == 0) return 0;    /* Q o errore di link */
+            }
+            continue;                     /* fine partita/stop/ripensa: menu */
+        }
+
+        if (choice == 2) {                     /* finali */
+            u8 idx = ask_endgames();
+            if (idx != 0xFF) {
+                humanColor = endWinner[idx];  /* l'umano gioca il lato che vince */
+                endActive = idx;
+                flip = (humanColor == BLACK) ? 1 : 0;
+                rc = start_endgame(idx);
+                if (rc == 2) return 1;
+                if (rc == 1) {          /* finita subito: scelta nuova/esci
+                                           gia' chiesta */
+                    if (!g_wantNew) return 0;
+                    endActive = 0xFF;
+                    continue;
+                }
+                /* 0 = Q/link morto: esci; 1 = game over + N: menu */
+                if (game_loop() == 0) return 0;
+                endActive = 0xFF;
+                continue;
+            }
+            continue;
+        }
+
+        /* gioco normale: livello e colore, poi partita */
+        level = ask_level();
+        humanColor = ask_color();
+        endActive = 0xFF;
+
+        flip = (humanColor == BLACK) ? 1 : 0;
+
+        draw_board();
+
+        comm_rx_flush();
+        if (comm_tx_byte(CMD_SET_COLOR) != 0 || comm_tx_byte(humanColor) != 0 ||
+            comm_tx_byte(CMD_SET_LEVEL) != 0 || comm_tx_byte(level) != 0) {
+            link_error();
+            return 1;
+        }
+        (void)wait_ack();
+        (void)wait_ack();
+
+        rc = start_new_game();
+        if (rc == 2) return 1;
+        if (rc == 1) {          /* partita finita subito (es. apertura): la
+                                   scelta nuova/esci e' gia' stata chiesta */
+            if (!g_wantNew) return 0;
+            continue;               /* N: si ripassa dal menu */
+        }
+        /* 0 = Q/link morto: esci; 1 = game over + N: si riparte dal menu */
+        if (game_loop() == 0) return 0;
     }
-  }
-
-  game_loop();
-  return 0;
 }

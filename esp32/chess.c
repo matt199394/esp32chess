@@ -20,7 +20,7 @@ s8  epSq;
 u8  halfmove;
 u8  kingSq[2];
 u16 posKey;
-u8  gamePly;
+u16 gamePly;
 u16 keyHist[MAXKEYS];
 u32 nodes;
 
@@ -329,6 +329,14 @@ u8 in_check(void)
     return attacked(kingSq[side], (u8)(side ^ 1));
 }
 
+/* il re del colore c e' sotto scacco nella posizione attuale (senza
+ * toccare il lato al tratto): serve all'INK per segnalare lo scacco
+ * dato dall'umano */
+u8 in_check_of(u8 c)
+{
+    return attacked(kingSq[c], (u8)(c ^ 1));
+}
+
 /* ------------------------------------------------------------------ */
 /* generazione mosse                                                   */
 /* ------------------------------------------------------------------ */
@@ -622,6 +630,9 @@ static void make_move(u16 m)
         npm = (s16)(npm + pieceVal[promoType[pr]]);
     }
     if (t == PAWN || cap) halfmove = 0;
+    else                  halfmove++;   /* altrimenti la regola delle 50 mosse
+                                                 * (e il conteggio ripetizioni) non
+                                                 * scatta mai */
 
     if (t == KING) {
         kingSq[c] = to;
@@ -715,7 +726,7 @@ void commit_move(u16 m)
        gamePly + (MAXSEARCH - 1): compatta PRIMA che gamePly possa
        far sforare il buffer (il vecchio limite MAXKEYS-4 era troppo
        alto e con gamePly=315 + 9 ply scriveva oltre keyHist[319]). */
-    if (gamePly >= (u8)(MAXKEYS - MAXSEARCH - 1)) {
+    if (gamePly >= (u16)(MAXKEYS - MAXSEARCH - 1)) {
         /* compatta la storia: restano le ultime 64 posizioni */
         for (i = 0; i < 64; i++) keyHist[i] = keyHist[gamePly - 63 + i];
         gamePly = 63;

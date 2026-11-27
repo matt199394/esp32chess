@@ -13,8 +13,18 @@ c64esp32cart), il **C64 fa solo da UI** (scacchiera, tastiera, testo, suoni).
 - **FATTO** protocollo §4 implementato su entrambi i lati.
 - **FATTO** trasporto ESP32: `Serial` (default, per test) + bus cartuccia
   (`-DUSE_C64_BUS`).
-- **FATTO** trasporto C64: `comm.s` (tx polling + rx via NMI, ring buffer 4B).
-- **BOZZA** UI C64 **testuale** con conio (da sostituire con la 3×3-charset).
+- **FATTO** trasporto C64: `comm.s` (tx polling + rx via NMI, ring buffer 16B).
+- **FATTO** UI C64 **grafica** 3×3-caratteri: scacchiera 24×24, charset hires
+  con le forme dei pezzi di "Don's Gambit" (estratte da dongambit.png:
+  neri solidi, bianchi a contorno), pannello sinistro, effetti sonori SID,
+  joystick port 2,
+  doppio timer (giocatore/AI), mossa del giocatore mostrata subito (snapshot/restore),
+  avviso "SCACCO!" (rosso = sei sotto scacco, giallo = hai dato scacco),
+  cronologia mosse a schermo + undo con `u`, fine partita con N = menu principale
+  (livello+colore riprodotti ogni volta) e Q = esci.
+- **NOTA** patte reclamabili (50 halfmove, triplica ripetizione) NON chiudono
+  la partita: arrivano come flag `F_DRAW50`/`F_DRAWREP` e sono mostrate come
+  avviso; chiudono solo matto/stallo/materiale/75 halfmove/ripetizione 5x.
 - **TODO** vedere "Prossimi passi" in fondo.
 
 ## Build (verificati in questa sessione)
@@ -22,6 +32,9 @@ c64esp32cart), il **C64 fa solo da UI** (scacchiera, tastiera, testo, suoni).
 ```bash
 # C64 UI -> chessui.prg
 cd c64 && make
+
+# regressione del timeout di comm_rx_byte (VICE headless, bordo verde = ok)
+cd c64 && make test-timeout
 
 # ESP32 motore (seriale)
 arduino-cli compile --fqbn esp32:esp32:mhetesp32minikit esp32
@@ -46,12 +59,15 @@ esp32/
   chess.c/chess.h  motore (copiato da chess2026, non modificare senza perft)
   protocol.h       costanti protocollo (KEEP IN SYNC con c64/protocol.h)
 c64/
-  chessui.c        UI testuale + macchina a stati
-  comm.s/comm.h    byte a byte $DE00/$DF00 + NMI ($0318, ring buffer 4B)
+  chessui.c        UI grafica hires (forme pezzi Don's Gambit) + macchina a stati
+  font_writer.h    font 512B per il charset custom
+  comm.s/comm.h    byte a byte $DE00/$DF00 + NMI ($0318, ring buffer 16B)
   protocol.h       costanti protocollo
   Makefile         cl65 -> chessui.prg
+  test_timeout.c   regressione timeout comm_rx_byte (VICE)
 docs/PROTOCOL.md   contratto del protocollo + trasporto fisico
 tools/uart_test.py prova motore su seriale
+tools/vice_test_timeout.py  esegue test_timeout.prg in x64sc, controlla il bordo
 ```
 
 ## Decisioni prese in questa sessione (da non ribaltare senza motivo)
@@ -67,8 +83,8 @@ tools/uart_test.py prova motore su seriale
    della cartuccia di riferimento); P lo ripristina `rti`. Attenzione: NON fare
    `pla/tay, pla/tax, pla` all'ingresso: spillerebbe i 3 byte (PCL,PCH,P) pushata
    dall'NMI e `rti` leggerebbe spazzatura -> crash del C64 (sintomo: READY).
-3. **Ring buffer rx da 4 byte** in `comm.s`: assorbe la raffica `BEST_MOVE`
-   (7 byte) senza perdite.
+3. **Ring buffer rx da 16 byte (15 utili)** in `comm.s`: assorbe la raffica
+   `BEST_MOVE` (7 byte) + `GAME_OVER` (3) senza perdite.
 4. **ESP32 = unico arbitro**; la UI C64 mantiene solo una copia della board per
    il display (`apply_move_local`, gestisce arrocco/en passant/promozione solo
    per disegnare) e NON decide la legalità.
@@ -95,15 +111,21 @@ tools/uart_test.py prova motore su seriale
    flottante → `/RESET` basso via 74LS14) e non si avvia. Il bus dati D0-D7
    NON c'entra: è isolato dal 74LS244 (abilitato solo su lettura `$DF00`,
    net `IO2` → `U3-1`/`U3-19`). Vedi schema `c64esp32cart/c64esp32crt1.1_kicad7`.
+7. **Il jiffy clock del C64 è BIG-ENDIAN**: il byte che cambia 60 volte al
+   secondo è `$A2` (`UDTIM` a `$F69B`: `inc $a2` → carry su `$A1` → `$A0`);
+   `$A1` cambia ogni 4,27 s, `$A0` ogni 18,2 min. Ogni timeout implementato
+   "a mano" (es. `comm_rx_byte`) deve leggere **`$A2`**: con `$A1`/`$A0` il
+   timeout diventa 256×/65536× più lungo, cioè un freeze silenzioso. Questo
+   errore è già costato un bug lungo (vedi "Sessione 10" in `docs/BUGS.md`).
+   Regressione: `make test-timeout` in `c64/` (VICE headless).
 
 ## Prossimi passi (ordine suggerito)
 
 1. ~~Porting motore + protocollo + UI testuale~~ FATTO (bozza).
 2. Provare il motore con `tools/uart_test.py` (e un paio di mosse: `e2e4`,
    promozione `e7e8q`, mossa illegale).
-3. Portare la UI grafica C64 3×3-charset da `chess2026/src/main_c64.c`
-   (scacchiera 24×24, pezzi disegnati glyph 64-123, pannello sinistro,
-   joystick, suoni SID) mantenendo `comm.s` al posto del motore locale.
+3. ~~Portare la UI grafica C64 3×3-charset~~ FATTO (grafica, SID, joystick,
+   timer, mossa immediata; font in `c64/font_writer.h`).
 4. Mock dell'ESP32 (o modalità simulata) per provare la UI in VICE senza
    cartuccia.
 5. Transposition table + history heuristic sull'ESP32 (RAM/CPU abbondanti).
