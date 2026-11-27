@@ -874,3 +874,50 @@ di finali che l'umano può vincere in un numero minimo di mosse).
   rigenerato identico).
 - Build cc65 senza nuovi warning; BSS fino a $703A, sotto $8400.
 - `g++ -fsyntax-only -std=gnu++11 -DUSE_C64_BUS` su `esp32.ino`: OK.
+
+## Sessione 17 — Layout del menu: sovrapposizioni, residui e colori fantasma (V18)
+
+### Problemi (segnalati da una review esterna)
+
+1. **Sovrapposizione con la scacchiera**: le voci `1 PARTITE FAMOSE` e
+   `2 GIOCA A SCACCHI` (16-17 caratteri) sforavano il pannello da 13 colonne
+   e finivano sotto la scacchiera (che parte dalla colonna 14).
+2. **Residui tra schermate**: `ask_level` scriveva sopra il menu senza
+   pulirlo (`2 GIOCA A SCACCHI` diventava `2 MEDIUM` + `A SCACCHI`).
+3. **Caselle colorate nel menu**: tornando al menu dopo una partita,
+   `square_color` evidenziava ancora `h2`/`joyFrom`/`joyCursor` anche sulla
+   scacchiera vuota (caselle gialle/cyan fantasma).
+4. **Testo superfluo e lingue miste**: coordinate su scacchiera vuota,
+   prompt `SCELTA:`/`CHOICE:` con eco del tasto, menu italiano accanto a
+   `LEVEL`/`COLOR`/`EASY`.
+
+### Cosa è stato fatto
+
+- Helper di layout: `put_item`/`menu_item` (troncano a PANEL_W: il testo
+  non può più finire sulla scacchiera), `list_item` (liste a tutto
+  schermo), `menu_clear` (svuota il pannello), `list_header` (titoli +
+  filetto + aiuto in fondo); colori `COL_TITLE`/`COL_KEY`/`COL_HINT`.
+- `square_color`: evidenziazioni (giallo/cyan) solo quando la scacchiera
+  è piena (`!emptyBoard`).
+- `draw_board`: titolo giallo, versione in grigio, niente coordinate
+  file/traversa quando `emptyBoard`.
+- Sottomenu famose e finali a tutto schermo (`fame_draw` + `list_header`,
+  indicatore pagina `1/3`); niente più buffer `label[40]` (le etichette
+  lunghe vengono scritte direttamente a schermo).
+- Menu principale corto nel pannello (`1 PARTITE/FAMOSE`, `2 GIOCA`,
+  `3 FINALI`), disegnato PRIMA del flip video insieme alla scacchiera vuota
+  (`show_menu_screen`): niente più flash di testo dopo il flip; via il
+  prompt `SCELTA:` e l'eco del tasto.
+- Livello/colore in italiano nel pannello (FACILE/MEDIO/DIFFICILE/ESPERTO,
+  BIANCO/NERO), scelta evidenziata in giallo, `menu_clear` evita i residui.
+- Messaggi di gioco in italiano (tutti ≤ 13 colonne): `MOSSA:`,
+  `PENSO...`, `MOSSA ERRATA`, `PEZZO NON TUO`, `NIENTE UNDO`,
+  `ERRORE LINK`, `PREMI TASTO`; il testo digitato parte da `KB_COL` (7).
+- `show_game_over`: `N=NUOVA Q=ESCI` (14 caratteri) sforava il blank da 13
+  lasciando l'ultima lettera a schermo → `N=NUOVA Q=ESC`.
+- Marcatore di build: **V18**.
+
+### Verifica
+
+- Build cc65 pulita (solo i soliti 4 warning di pointer-signedness);
+  BSS fino a $705C, sotto $8400; chessui.prg 22414 byte.

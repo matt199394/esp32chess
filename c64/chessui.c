@@ -95,6 +95,15 @@ static const unsigned char promoType[4] = { KNIGHT, BISHOP, ROOK, QUEEN };
 #define OVER_KEY_ROW 24
 #define PANEL_W    13
 
+#define COL_TITLE  COLOR_YELLOW      /* titoli */
+#define COL_KEY    COLOR_LIGHTGREEN  /* tasti 1/2/3 */
+#define COL_HINT   COLOR_GRAY2       /* righe di aiuto, versione */
+
+#define KB_COL     7                 /* prima colonna del testo digitato */
+
+#define FAME_PER_PAGE 10
+#define LIST_STEP     2              /* righe tra una voce e l'altra */
+
 /* ---- stato locale (solo display) ---- */
 static u8 lboard[128];
 static u8 lside;
@@ -141,6 +150,7 @@ static const char * const fameLabel[FAME_N] = {
     "CARLSEN-ANAND 2013 G5",
     "KASPAROV-TOPALOV 1999 II",
 };
+#define FAME_PAGES ((FAME_N + FAME_PER_PAGE - 1) / FAME_PER_PAGE)
 
 /* finali in corso: indice (0xFF = partita normale). Serve a undo e resync:
  * la board locale va ricostruita dalla posizione del finale, non da quella
@@ -409,6 +419,38 @@ static void scr_clear(void)
     }
 }
 
+/* voce "tasto testo": il testo viene troncato a maxx, quindi non puo'
+ * mai finire sulla scacchiera (pannello) o a capo (schermo intero) */
+static void put_item(u8 y, char key, const char *txt, u8 color, u8 maxx)
+{
+    u8 x = 2;
+    scr_put(0, y, to_screen(key), COL_KEY);
+    while (*txt && x < maxx) {
+        scr_put(x, y, to_screen(*txt), color);
+        x++;
+        txt++;
+    }
+}
+#define menu_item(y,k,t,c) put_item((y),(k),(t),(c),PANEL_W)
+#define list_item(y,k,t)   put_item((y),(k),(t),COLOR_WHITE,40)
+
+/* svuota il pannello sinistro sotto il titolo: niente residui */
+static void menu_clear(void)
+{
+    u8 y;
+    for (y = 2; y <= 24; y++) scr_blank(0, y, PANEL_W, COLOR_BLACK);
+}
+
+/* schermata a tutto schermo: titolo, filetto, riga di aiuto in fondo */
+static void list_header(const char *title, const char *footer)
+{
+    u8 x;
+    scr_clear();
+    scr_puts(0, 0, title, COL_TITLE);
+    for (x = 0; x < 40; x++) scr_put(x, 1, to_screen('-'), COL_HINT);
+    scr_puts(0, 24, footer, COL_HINT);
+}
+
 /* ------------------------------------------------------------------ */
 /* effetti sonori SID (voce 1): note musicali con envelope, non       */
 /* semplici tonfi: l'onda quadra a frequenza bassissima del primo     */
@@ -625,8 +667,10 @@ static u8 square_color(u8 sq)
     u8 rank = (u8)(sq >> 4);
     u8 file = (u8)(sq & 7);
 
-    if (sq == h2 || sq == joyFrom) return COLOR_YELLOW;
-    if (sq == joyCursor) return COLOR_CYAN;
+    if (!emptyBoard) {
+        if (sq == h2 || sq == joyFrom) return COLOR_YELLOW;
+        if (sq == joyCursor) return COLOR_CYAN;
+    }
     return (u8)(((rank + file) & 1) ? COLOR_GRAY3 : COLOR_BLUE);
 }
 
@@ -659,18 +703,20 @@ static void draw_board(void)
     u8 r, f, rank, file, sq;
 
     scr_clear();
-    scr_puts(0, 0, "ESP32CHESS", COLOR_WHITE);
-    scr_puts(11, 0, "V17", COLOR_WHITE);  /* marcatore build: se non appare,
+    scr_puts(0, 0, "ESP32CHESS", COL_TITLE);
+    scr_puts(11, 0, "V18", COL_HINT);  /* marcatore build: se non appare,
                                             sulla C64 gira un .prg vecchio */
 
-    for (f = 0; f < 8; f++)
-        scr_put((u8)(BOARD_X + 3 * f + 1), FILE_ROW,
-                to_screen((char)('a' + (flip ? (7 - f) : f))), COLOR_WHITE);
+    if (!emptyBoard)
+        for (f = 0; f < 8; f++)
+            scr_put((u8)(BOARD_X + 3 * f + 1), FILE_ROW,
+                    to_screen((char)('a' + (flip ? (7 - f) : f))), COLOR_WHITE);
 
     for (r = 0; r < 8; r++) {
         rank = flip ? r : (u8)(7 - r);
-        scr_put(RANK_COL_R, (u8)(BOARD_Y + 3 * r + 1),
-                to_screen((char)('1' + rank)), COLOR_WHITE);
+        if (!emptyBoard)
+            scr_put(RANK_COL_R, (u8)(BOARD_Y + 3 * r + 1),
+                    to_screen((char)('1' + rank)), COLOR_WHITE);
         for (f = 0; f < 8; f++) {
             file = flip ? (u8)(7 - f) : f;
             sq = (u8)((rank << 4) | file);
@@ -1135,7 +1181,7 @@ static u16 get_human_move(void)
 
     scr_blank(0, PROMPT_ROW, PANEL_W, COLOR_BLACK);
     scr_blank(0, MSG_ROW, PANEL_W, COLOR_BLACK);
-    scr_puts(0, PROMPT_ROW, "move:", COLOR_WHITE);
+    scr_puts(0, PROMPT_ROW, "MOSSA:", COLOR_WHITE);
 
     joyCursor = find_king(lside);
     joyFrom = 0xFF;
@@ -1158,24 +1204,24 @@ static u16 get_human_move(void)
                     return MOVE_UNDO;
                 mv = parse_local(kb);
                 if (mv != MOVE_NONE) return mv;
-                put_msg("bad move", COLOR_LIGHTRED);
+                put_msg("MOSSA ERRATA", COLOR_LIGHTRED);
                 sfx_error();
                 while (klen) {
                     klen--;
-                    scr_put((u8)(6 + klen), PROMPT_ROW, 0x20, COLOR_WHITE);
+                    scr_put((u8)(KB_COL + klen), PROMPT_ROW, 0x20, COLOR_WHITE);
                 }
                 continue;
             }
             if (c == 20 || c == 8) {
                 if (klen) {
                     klen--;
-                    scr_put((u8)(6 + klen), PROMPT_ROW, 0x20, COLOR_WHITE);
+                    scr_put((u8)(KB_COL + klen), PROMPT_ROW, 0x20, COLOR_WHITE);
                 }
                 continue;
             }
             if (c == 3 || c == '.') return MOVE_NONE;
             if (klen < 5) {
-                scr_put((u8)(6 + klen), PROMPT_ROW, to_screen((char)c), COLOR_WHITE);
+                scr_put((u8)(KB_COL + klen), PROMPT_ROW, to_screen((char)c), COLOR_WHITE);
                 kb[klen++] = (char)c;
             }
         } else {
@@ -1203,13 +1249,13 @@ static u16 get_human_move(void)
                         joyFrom = joyCursor;
                         paint_sq(joyFrom);
                     } else {
-                        put_msg("not yours", COLOR_LIGHTRED);
+                        put_msg("PEZZO NON TUO", COLOR_LIGHTRED);
                         sfx_error();
                     }
                 } else {
                     u16 mv = move_from_squares(joyFrom, joyCursor);
                     if (mv != MOVE_NONE) return mv;
-                    put_msg("bad move", COLOR_LIGHTRED);
+                    put_msg("MOSSA ERRATA", COLOR_LIGHTRED);
                     sfx_error();
                     {
                         u8 oldFrom = joyFrom;
@@ -1235,8 +1281,8 @@ static void link_error(void) {
     comm_rx_flush();
     scr_blank(0, PROMPT_ROW, PANEL_W, COLOR_BLACK);
     scr_blank(0, MSG_ROW, PANEL_W, COLOR_BLACK);
-    put_msg("LINK ERROR", COLOR_LIGHTRED);
-    scr_puts(0, OVER_KEY_ROW, "press a key", COLOR_WHITE);
+    put_msg("ERRORE LINK", COLOR_LIGHTRED);
+    scr_puts(0, OVER_KEY_ROW, "PREMI TASTO", COLOR_WHITE);
     (void)cgetc();
     scr_blank(0, OVER_KEY_ROW, PANEL_W, COLOR_BLACK);
 }
@@ -1296,7 +1342,7 @@ static int wait_rsp(void) {
     int r;
 
     scr_blank(0, PROMPT_ROW, PANEL_W, COLOR_BLACK);
-    scr_puts(0, PROMPT_ROW, "thinking...", COLOR_WHITE);
+    scr_puts(0, PROMPT_ROW, "PENSO...", COLOR_WHITE);
     for (;;) {
         r = comm_rx_poll();
         if (r >= 0) return r;
@@ -1342,7 +1388,7 @@ static void show_game_over(u8 reason, u8 winner) {
                  winner == WINNER_WHITE ? "BIANCO VINCE" : "NERO VINCE", COLOR_YELLOW);
     else
         scr_puts(0, OVER_WHO_ROW, "PATTA", COLOR_YELLOW);
-    scr_puts(0, OVER_KEY_ROW, "N=NUOVA Q=ESCI", COLOR_WHITE);
+    scr_puts(0, OVER_KEY_ROW, "N=NUOVA Q=ESC", COLOR_WHITE);
 
     for (;;) {
         c = cgetc();
@@ -1533,7 +1579,7 @@ static unsigned char recover_link(void) {
 static unsigned char do_undo(void) {
     u16 i;
     if (histN < 2) {
-        put_msg("nothing", COLOR_LIGHTRED);
+        put_msg("NIENTE UNDO", COLOR_LIGHTRED);
         sfx_error();
         return 0;
     }
@@ -1565,40 +1611,40 @@ static unsigned char do_undo(void) {
 /* partite famose: replay con l'archivio dell'ESP32                    */
 /* ================================================================== */
 
-/* Sottomenu: 3 pagine da 10; 1-9 e 0 selezionano, SPAZIO pagina avanti,
- * '.' o RUN-STOP indietro. Ritorna 0..29 o 0xFF se l'utente ripensa. */
+/* Sottomenu: 3 pagine da 10 a tutto schermo; 1-9 e 0 selezionano,
+ * SPAZIO pagina avanti, '.' o RUN-STOP indietro. Ritorna 0..29 o 0xFF
+ * se l'utente ripensa. */
+static void fame_draw(u8 page)
+{
+    u8 i, first = (u8)(page * FAME_PER_PAGE), cnt = FAME_PER_PAGE;
+
+    if ((u8)(first + cnt) > FAME_N) cnt = (u8)(FAME_N - first);
+    list_header("PARTITE FAMOSE", "SPAZIO=PAGINA  .=INDIETRO");
+    scr_put(37, 0, to_screen((char)('1' + page)), COL_HINT);
+    scr_put(38, 0, to_screen('/'), COL_HINT);
+    scr_put(39, 0, to_screen((char)('0' + FAME_PAGES)), COL_HINT);
+    for (i = 0; i < cnt; i++)
+        list_item((u8)(3 + LIST_STEP * i), (char)(i == 9 ? '0' : '1' + i),
+                  fameLabel[first + i]);
+}
+
 static u8 ask_fame(void)
 {
-    u8 page = 0, sel = 0xFF;
+    u8 page = 0, sel;
     int c;
 
+    fame_draw(page);
     for (;;) {
-        u8 i, first = (u8)(page * 10), cnt = 10;
-        char label[40];                 /* le etichette lunghe (fino a 32+3) */
-        u8 pos;
-
-        scr_clear();
-        scr_puts(0, 0, "PARTITE FAMOSE", COLOR_WHITE);
-        scr_puts(0, 1, "SPAZIO=PAGE  . =INDIETRO", COLOR_WHITE);
-        if (page == 2) cnt = (u8)(FAME_N - 20);
-        for (i = 0; i < cnt; i++) {
-            label[0] = (char)('1' + i);
-            if (i == 9) label[0] = '0';
-            label[1] = ' ';
-            pos = 2;
-            while (fameLabel[first + i][pos - 2]) {
-                label[pos] = fameLabel[first + i][pos - 2];
-                pos++;
-            }
-            label[pos] = 0;
-            scr_puts(0, (u8)(3 + i), label, COLOR_WHITE);
-        }
-
         c = cgetc();
-        if (c == ' ') { page = (u8)((page + 1) % 3); continue; }
+        if (c == ' ') {
+            page = (u8)((page + 1) % FAME_PAGES);
+            fame_draw(page);
+            continue;
+        }
         if (c == 3 || c == '.') return 0xFF;
-        if (c >= '1' && c <= '9') sel = (u8)(page * 10 + (c - '1'));
-        else if (c == '0') sel = (u8)(page * 10 + 9);
+        if (c >= '1' && c <= '9')  sel = (u8)(page * FAME_PER_PAGE + (c - '1'));
+        else if (c == '0')         sel = (u8)(page * FAME_PER_PAGE + 9);
+        else continue;
         if (sel < FAME_N) return sel;
     }
 }
@@ -1684,38 +1730,21 @@ static u8 replay_loop(u8 idx)
 /* finali: posizioni archiviate, l'umano gioca il lato che vince       */
 /* ================================================================== */
 
-/* Sottomenu finali: 1..7 selezionano, '.' o RUN-STOP indietro.
- * Ritorna 0..END_COUNT-1 o 0xFF se l'utente ripensa. */
+/* Sottomenu finali a tutto schermo: 1..7 selezionano, '.' o RUN-STOP
+ * indietro. Ritorna 0..END_COUNT-1 o 0xFF se l'utente ripensa. */
 static u8 ask_endgames(void)
 {
-    u8 sel = 0xFF;
+    u8 i;
     int c;
 
+    list_header("FINALI", "VINCI TU  .=INDIETRO");
+    for (i = 0; i < END_COUNT; i++)
+        list_item((u8)(3 + LIST_STEP * i), (char)('1' + i), endLabel[i]);
+
     for (;;) {
-        u8 i;
-        char label[40];
-        u8 pos;
-
-        scr_clear();
-        scr_puts(0, 0, "FINALI", COLOR_WHITE);
-        scr_puts(0, 1, "VINCI TU  . =INDIETRO", COLOR_WHITE);
-        for (i = 0; i < END_COUNT; i++) {
-            label[0] = (char)('1' + i);
-            label[1] = ' ';
-            pos = 2;
-            while (endLabel[i][pos - 2]) {
-                label[pos] = endLabel[i][pos - 2];
-                pos++;
-            }
-            label[pos] = 0;
-            scr_puts(0, (u8)(3 + i), label, COLOR_WHITE);
-        }
-
         c = cgetc();
         if (c == 3 || c == '.') return 0xFF;
-        if (c >= '1' && (u8)(c - '1') < END_COUNT)
-            sel = (u8)(c - '1');
-        if (sel < END_COUNT) return sel;
+        if (c >= '1' && (u8)(c - '1') < END_COUNT) return (u8)(c - '1');
     }
 }
 
@@ -1778,7 +1807,7 @@ static u8 game_loop(void) {
         from = M_FROM(m);
         p = lboard[from];
         if (p == EMPTY || PC(p) != lside) {
-            put_msg("not yours", COLOR_LIGHTRED);
+            put_msg("PEZZO NON TUO", COLOR_LIGHTRED);
             sfx_error();
             msg_hold();
             continue;
@@ -1823,7 +1852,7 @@ static u8 game_loop(void) {
             for (i = 0; i < drawnN; i++)   /* ridisegna solo le case toccate */
                 draw_square(drawnSq[i]);
             scr_blank(0, PROMPT_ROW, PANEL_W, COLOR_BLACK);
-            put_msg("bad move", COLOR_LIGHTRED);
+            put_msg("MOSSA ERRATA", COLOR_LIGHTRED);
             sfx_error();
             msg_hold();
             continue;
@@ -1858,29 +1887,50 @@ static u8 game_loop(void) {
 
 static u8 ask_level(void)
 {
+    static const char * const lv[4] = { "FACILE", "MEDIO", "DIFFICILE", "ESPERTO" };
+    u8 i;
     int c;
 
-    scr_puts(0, 2, "LEVEL", COLOR_WHITE);
-    scr_puts(0, 4, "1 EASY", COLOR_WHITE);
-    scr_puts(0, 5, "2 MEDIUM", COLOR_WHITE);
-    scr_puts(0, 6, "3 HARD", COLOR_WHITE);
-    scr_puts(0, 7, "4 STRONG", COLOR_WHITE);
-    scr_puts(0, 9, "CHOICE:", COLOR_WHITE);
+    menu_clear();
+    scr_puts(0, 2, "LIVELLO", COL_TITLE);
+    for (i = 0; i < 4; i++)
+        menu_item((u8)(4 + i), (char)('1' + i), lv[i], COLOR_WHITE);
     do { c = cgetc(); } while (c < '1' || c > '4');
-    scr_put(7, 9, to_screen((char)c), COLOR_WHITE);
+    menu_item((u8)(4 + c - '1'), (char)c, lv[c - '1'], COLOR_YELLOW);  /* scelta */
     return (u8)(c - '1');
 }
 
 static u8 ask_color(void)
 {
+    static const char * const cl[2] = { "BIANCO", "NERO" };
+    u8 i;
     int c;
 
-    scr_puts(0, 11, "COLOR:", COLOR_WHITE);
-    scr_puts(0, 12, "1 WHITE", COLOR_WHITE);
-    scr_puts(0, 13, "2 BLACK", COLOR_WHITE);
+    scr_puts(0, 10, "COLORE", COL_TITLE);
+    for (i = 0; i < 2; i++)
+        menu_item((u8)(12 + i), (char)('1' + i), cl[i], COLOR_WHITE);
     do { c = cgetc(); } while (c < '1' || c > '2');
-    scr_put(7, 11, to_screen((char)c), COLOR_WHITE);
+    menu_item((u8)(12 + c - '1'), (char)c, cl[c - '1'], COLOR_YELLOW);
     return (u8)(c - '1');
+}
+
+/* menu principale nel pannello (max 13 colonne) */
+static void draw_main_menu(void)
+{
+    menu_item(3, '1', "PARTITE", COLOR_WHITE);
+    scr_puts(2, 4, "FAMOSE", COLOR_WHITE);
+    menu_item(6, '2', "GIOCA",   COLOR_WHITE);
+    menu_item(8, '3', "FINALI",  COLOR_WHITE);
+}
+
+/* scacchiera vuota + menu: stessa schermata al primo giro (prima del flip
+ * video) e a fine partita */
+static void show_menu_screen(void)
+{
+    emptyBoard = 1;
+    draw_board();
+    emptyBoard = 0;
+    draw_main_menu();
 }
 
 /* ================================================================== */
@@ -1907,12 +1957,11 @@ int main(void)
     segT0 = (u32)clock();
 
     /* il menu si prepara in RAM ($8400) mentre a video c'e' ancora lo
-     * schermo del BASIC: al flip appare gia' completo, senza la flash di
-     * scacchiera malformata (che prima si vedeva finche' charset e screen
-     * non erano pronti dopo la commutazione di $D018) */
-    emptyBoard = 1;
-    draw_board();
-    emptyBoard = 0;
+     * schermo del BASIC: al flip appare gia' completo (scacchiera vuota
+     * E menu), senza la flash di scacchiera malformata (che prima si
+     * vedeva finche' charset e screen non erano pronti dopo la
+     * commutazione di $D018) */
+    show_menu_screen();
     POKE(0xDD00, (u8)((PEEK(0xDD00) & 0xFC) | 0x01));  /* banca VIC 2 */
     POKE(0xD018, 0x13);                      /* schermo $8400, charset $8800 */
 
@@ -1920,22 +1969,10 @@ int main(void)
     for (;;) {
         u8 choice;
 
-        /* menu principale a tre voci: a fine partita N ripassa da qui;
-         * al primo giro la schermata e' gia' pronta (disegnata prima del
-         * flip video) */
-        if (!first) {
-            emptyBoard = 1;
-            draw_board();
-            emptyBoard = 0;
-        }
+        if (!first) show_menu_screen();
         first = 0;
 
-        scr_puts(0, 3,  "1 PARTITE FAMOSE", COLOR_WHITE);
-        scr_puts(0, 5,  "2 GIOCA A SCACCHI", COLOR_WHITE);
-        scr_puts(0, 7,  "3 FINALI", COLOR_WHITE);
-        scr_puts(0, 9,  "SCELTA:", COLOR_WHITE);
         do { c = cgetc(); } while (c < '1' || c > '3');
-        scr_put(7, 9, to_screen((char)c), COLOR_WHITE);
         choice = (u8)(c - '1');
 
         if (choice == 0) {                     /* partite famose */
