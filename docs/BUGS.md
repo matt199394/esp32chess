@@ -429,3 +429,11 @@ POSSEVANO bloccare all'avvio erano due:
 
 - Build cc65 pulita (BSS `$48B2`).
 - `esp32.ino` verificato alla sintassi con stub Arduino/gpio (`-DUSE_C64_BUS`).
+
+### Conferma da hardware (stesso giorno)
+
+Con il .prg "last-working" (`$A1`) la partita parte ma solo **~30 secondi**
+dopo la scelta del colore: e' esattamente il timeout di `drain_link()` —
+`comm_rx_byte(100)` = 6+1 tick x 256 jiffy (4,27 s ciascuno con `$A1`) =
+~30 s. L'attesa c'era sempre stata (avvio "lento"); con `$A2` diventava
+~6,5 ore (freeze); con `$A0` (branch attuale) sono 100 ms.
