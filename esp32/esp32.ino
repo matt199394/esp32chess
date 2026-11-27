@@ -181,6 +181,13 @@ static u16 moveList[MAXMOVES];      /* buffer per legal_moves() */
 static u16 gameHist[400];           /* mosse giocate (per UNDO) */
 static u16 gameHistN = 0;
 
+/* Indice del finale in corso (0xFF = partita normale). Serve a UNDO e al
+ * resync: ricominciare dal nuovo_game() butterebbe la posizione del
+ * finale; ricaricando endActive le due parti restano allineate.
+ * Dichiarato qui (non fra i gestori, come in V17) perche' handleNewGame()
+ * lo azzera prima di load_endgame(). */
+static uint8_t endActive = 0xFF;
+
 static uint8_t levelDepth(uint8_t lv) {
   switch (lv) {
     case LEVEL_EASY:   return 2;
@@ -354,10 +361,7 @@ static void handleMove(void) {
 
 /* ---- finali: posizioni iniziali dall'archivio in flash ---- */
 
-/* Indice del finale in corso (0xFF = partita normale). Serve a UNDO e al
- * resync: ricominciare dal nuovo_game() butterebbe la posizione del
- * finale; ricaricando endActive le due parti restano allineate. */
-static uint8_t endActive = 0xFF;
+/* (endActive e' dichiarato in cima, prima dei gestori dei comandi) */
 
 /* Carica la posizione del finale idx (stessa procedura della generazione:
  * new_game come base, poi sovrascrive board/side/castle/ep e ricalcola
