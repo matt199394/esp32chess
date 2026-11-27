@@ -437,3 +437,48 @@ dopo la scelta del colore: e' esattamente il timeout di `drain_link()` —
 `comm_rx_byte(100)` = 6+1 tick x 256 jiffy (4,27 s ciascuno con `$A1`) =
 ~30 s. L'attesa c'era sempre stata (avvio "lento"); con `$A2` diventava
 ~6,5 ore (freeze); con `$A0` (branch attuale) sono 100 ms.
+
+## Sessione 8 — Freeze permanente con V7 confermata a schermo
+
+### Sintomo
+
+Con la build V7 (branch tip, `$A0`) il gioco si blocca: il C64 disegna la
+scacchiera con i pezzi due volte (normale: menu + `start_new_game`) e poi
+freeza, senza LINK ERROR, senza "MOSSE" e senza "move:".
+
+### Analisi
+
+Con V7 ogni attesa del percorso di avvio ha un timeout:
+
+- `drain_link()` = `comm_rx_byte(100)` → ~100 ms;
+- `comm_tx_byte` → ~58 ms (pronto) + ~50 ms (ack), loop contati, indipendenti
+  da `$A0`;
+- `wait_ack()` → `comm_rx_byte(10000)` → ~10 s.
+
+Un freeze permanente silenzioso non dovrebbe quindi essere possibile mentre
+il jiffy clock gira. Restano due ipotesi:
+
+1. **jiffy clock/IRQ congelato**: `comm_rx_byte` gira su `$A0` (`beq @wait`
+   infinito se `$A0` non cambia); cc65 `clock()` chiama il KERNAL `RDTIM`
+   ($FFDE), quindi si congelerbbero insieme timer e debounce del joystick.
+   Contraddizione: il menu (cgetc) funziona e richiede l'IRQ.
+2. **crash della CPU** (salto in codice corrotto): schermo congelato con
+   l'ultimo contenuto scritto.
+
+### Tracer (build V8)
+
+Lettere `A`-`H` su MSG_ROW (riga 21), scritte man mano; al freeze la lettera
+piu' avanzata indica l'ultimo punto raggiunto:
+
+- `A` inizio `start_new_game`, prima di `drain_link`;
+- `B` dopo `drain_link`;
+- `C` dopo tx `NEW_GAME`;
+- `D` ACK ricevuto / `E` ACK NON ricevuto;
+- `F` dopo `show_history`;
+- `G` ingresso in `game_loop`;
+- `H` ingresso in `recv_engine_move` (solo se tocchi al nero).
+
+Letture chiave: solo `A` → freeze dentro `drain_link` (sospettare `$A0`
+congelato); `A`+`B` → dentro tx NEW_GAME (ESP32 non alza D7); fino a `D`/`E`
+senza `F` → impossibile con timeout funzionanti; `F`/`G` visibili ma input
+morto → IRQ morto in game_loop.
